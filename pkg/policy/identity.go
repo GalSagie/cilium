@@ -28,6 +28,8 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/u8proto"
 
+	"encoding/json"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/sirupsen/logrus"
 )
 
@@ -45,7 +47,9 @@ const (
 
 var (
 	// IdentitiesPath is the to where identities are stored
-	IdentitiesPath = path.Join(kvstore.BaseKeyPrefix, "state", "identities", "v1")
+	IdentitiesPath   = path.Join(kvstore.BaseKeyPrefix, "state", "identities", "v1")
+	IPIdentitiesPath = path.Join(kvstore.BaseKeyPrefix, "state", "endpointIPs", "v1")
+	IPIdentityCache  = NewIPCache()
 )
 
 // NumericIdentity is the numeric representation of a security identity / a
@@ -285,8 +289,9 @@ func (gi globalIdentity) PutKey(v string) (allocator.AllocatorKey, error) {
 }
 
 var (
-	setupOnce         sync.Once
-	identityAllocator *allocator.Allocator
+	setupOnce              sync.Once
+	setupIPIdentityWatcher sync.Once
+	identityAllocator      *allocator.Allocator
 )
 
 // IdentityAllocatorOwner is the interface the owner of an identity allocator
@@ -429,4 +434,106 @@ func identityWatcher(owner IdentityAllocatorOwner) {
 			// Ignore modify events
 		}
 	}
+}
+
+type IPCache struct {
+	Mutex lock.RWMutex
+	cache map[string]NumericIdentity
+}
+
+func NewIPCache() *IPCache {
+	return &IPCache{
+		cache: map[string]NumericIdentity{},
+	}
+}
+
+func (ipc *IPCache) Add(endpointIP string, identity NumericIdentity) {
+	ipc.Mutex.Lock()
+	ipc.cache[endpointIP] = identity
+	ipc.Mutex.Unlock()
+}
+
+func (ipc *IPCache) Delete(endpointIP string) {
+	ipc.Mutex.Lock()
+	delete(ipc.cache, endpointIP)
+	ipc.Mutex.Unlock()
+}
+
+func (ipc *IPCache) Update(endpointIP string, identity NumericIdentity) {
+	ipc.Mutex.Lock()
+	ipc.cache[endpointIP] = identity
+	ipc.Mutex.Unlock()
+}
+
+func (ipc *IPCache) Lookup(endpointIP string) (NumericIdentity, bool) {
+	ipc.Mutex.RLock()
+	identity, exists := ipc.cache[endpointIP]
+	ipc.Mutex.RUnlock()
+	return identity, exists
+}
+
+// IPIdentityMappingOwner is the interface the owner of an identity allocator
+// must implement
+type IPIdentityMappingOwner interface {
+	// TriggerPolicyUpdates will be called whenever a policy recalculation
+	// must be triggered
+	TriggerPolicyUpdates(force bool) *sync.WaitGroup
+}
+
+// GetIpIdentityMapModel returns all known endpoint IP to security identity mappings
+// stored in the key-value store.
+func GetIpIdentityMapModel() {
+	// TODO (ianvernon) return model of ip to identity mapping. For use in CLI.
+}
+
+func ipIdentityWatcher(owner IPIdentityMappingOwner) {
+	watcher := kvstore.ListAndWatch("endpointIPWatcher", IPIdentitiesPath, 512)
+	for {
+		var (
+			identity     NumericIdentity
+			cacheChanged bool
+		)
+
+		// Get events from channel as they come in.
+		event := <-watcher.Events
+
+		_ = json.Unmarshal(event.Value, &identity)
+
+		// Synchronize local caching of endpoint IP to identity mapping with
+		// operation key-value store has informed us about.
+
+		cachedIdentity, exists := IPIdentityCache.Lookup(event.Key)
+
+		switch event.Typ {
+		case kvstore.EventTypeCreate, kvstore.EventTypeModify:
+			// Update local cache
+			if !exists || cachedIdentity != identity {
+				IPIdentityCache.Update(event.Key, identity)
+				cacheChanged = true
+			}
+		case kvstore.EventTypeDelete:
+			if exists {
+				IPIdentityCache.Delete(event.Key)
+				cacheChanged = true
+			}
+		}
+
+		// Trigger policy updates only if cache has changed.
+		if cacheChanged {
+			log.WithFields(logrus.Fields{
+				"endpoint-ip":      event.Key,
+				"cached-identity":  cachedIdentity,
+				logfields.Identity: identity,
+			}).Debugf("triggering policy updates because endpoint IP cache changed state")
+			owner.TriggerPolicyUpdates(true)
+		}
+	}
+}
+
+// InitIPIdentityWatcher initializes the watcher for ip-identity mapping events
+// in the key-value store.
+func InitIPIdentityWatcher(owner IPIdentityMappingOwner) {
+	setupIPIdentityWatcher.Do(func() {
+		go ipIdentityWatcher(owner)
+	})
 }

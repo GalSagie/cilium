@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/k8s"
+	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
@@ -917,20 +919,94 @@ func (e *Endpoint) runIdentityToK8sPodSync() {
 	)
 }
 
+// This synchronizes the key-value store with a mapping of the endpoint's IPv4
+// IP with the numerical ID representing its security identity.
+func (e *Endpoint) runIPv4IdentitySync() {
+	e.controllers.UpdateController(fmt.Sprintf("sync-ipv4-identity-mapping (%d)", e.ID),
+		controller.ControllerParams{
+			DoFunc: func() error {
+
+				e.Mutex.RLock()
+				ipKey := path.Join(policy.IPIdentitiesPath, e.IPv4.String())
+				if e.SecLabel == nil {
+					e.Mutex.RUnlock()
+					return nil
+				}
+				identityValue := e.SecLabel.ID.StringID()
+
+				// Release lock as we do not want to have long-lasting key-value
+				// store operations resulting in lock being held for a long time.
+				e.Mutex.RUnlock()
+				if err := kvstore.Update(ipKey, []byte(identityValue), true); err != nil {
+					return fmt.Errorf("unable to add endpoint IP '%s' to identity '%d': %s", ipKey, identityValue, err)
+				}
+				return nil
+			},
+			StopFunc: func() error {
+				e.Mutex.RLock()
+				ipKey := path.Join(policy.IPIdentitiesPath, e.IPv4.String())
+				e.Mutex.RUnlock()
+				if err := kvstore.Delete(ipKey); err != nil {
+					return fmt.Errorf("unable to delete endpoint IPv4 '%s': %s", ipKey, err)
+				}
+				return nil
+			},
+			RunInterval: time.Duration(1) * time.Minute,
+		},
+	)
+}
+
+// This synchronizes the key-value store with a mapping of the endpoint's IPv6
+// IP with the numerical ID representing its security identity.
+func (e *Endpoint) runIPv6IdentitySync() {
+	e.controllers.UpdateController(fmt.Sprintf("sync-ipv6-identity-mapping (%d)", e.ID),
+		controller.ControllerParams{
+			DoFunc: func() error {
+
+				e.Mutex.RLock()
+				ipKey := path.Join(policy.IPIdentitiesPath, e.IPv6.String())
+				if e.SecLabel == nil {
+					e.Mutex.RUnlock()
+					return nil
+				}
+				identityValue := e.SecLabel.ID.StringID()
+
+				// Release lock as we do not want to have long-lasting key-value
+				// store operations resulting in lock being held for a long time.
+				e.Mutex.RUnlock()
+				if err := kvstore.Update(ipKey, []byte(identityValue), true); err != nil {
+					return fmt.Errorf("unable to add endpoint IPv6 '%s': %s", ipKey, identityValue, err)
+				}
+				return nil
+			},
+			StopFunc: func() error {
+				e.Mutex.RLock()
+				ipKey := path.Join(policy.IPIdentitiesPath, e.IPv6.String())
+				e.Mutex.RUnlock()
+				if err := kvstore.Delete(ipKey); err != nil {
+					return fmt.Errorf("unable to delete endpoint IPv6 '%s': %s", ipKey, err)
+				}
+				return nil
+			},
+			RunInterval: time.Duration(1) * time.Minute,
+		},
+	)
+}
+
 // SetIdentity resets endpoint's policy identity to 'id'.
 // Caller triggers policy regeneration if needed.
 // Called with e.Mutex Locked
-func (e *Endpoint) SetIdentity(owner Owner, id *policy.Identity) {
+func (e *Endpoint) SetIdentity(owner Owner, identity *policy.Identity) {
 	cache := policy.GetConsumableCache()
 
 	if e.Consumable != nil {
-		if e.SecLabel != nil && id.ID == e.Consumable.ID {
+		if e.SecLabel != nil && identity.ID == e.Consumable.ID {
 			// Even if the numeric identity is the same, the order in which the
 			// labels are represented may change.
-			e.SecLabel = id
+			e.SecLabel = identity
 			e.Consumable.Mutex.Lock()
-			e.Consumable.Labels = id
-			e.Consumable.LabelArray = id.Labels.ToSlice()
+			e.Consumable.Labels = identity
+			e.Consumable.LabelArray = identity.Labels.ToSlice()
 			e.Consumable.Mutex.Unlock()
 			return
 		}
@@ -940,8 +1016,8 @@ func (e *Endpoint) SetIdentity(owner Owner, id *policy.Identity) {
 		// counting via the cache?
 		cache.Remove(e.Consumable)
 	}
-	e.SecLabel = id
-	e.Consumable = cache.GetOrCreate(id.ID, id)
+	e.SecLabel = identity
+	e.Consumable = cache.GetOrCreate(identity.ID, identity)
 
 	// Sets endpoint state to ready if was waiting for identity
 	if e.GetStateLocked() == StateWaitingForIdentity {
@@ -950,9 +1026,17 @@ func (e *Endpoint) SetIdentity(owner Owner, id *policy.Identity) {
 
 	e.runIdentityToK8sPodSync()
 
+	// Whenever the identity is updated, propagate change to key-value store
+	// of IP to identity mapping.
+
+	// TODO (ianvernon): add check to only run this controller if !IPv4Disabled
+	// for daemon (owner)
+	e.runIPv4IdentitySync()
+	e.runIPv6IdentitySync()
+
 	e.Consumable.Mutex.RLock()
 	e.getLogger().WithFields(logrus.Fields{
-		logfields.Identity: id,
+		logfields.Identity: identity,
 		"consumable":       e.Consumable,
 	}).Debug("Set identity and consumable of EP")
 	e.Consumable.Mutex.RUnlock()
