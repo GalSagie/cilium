@@ -20,7 +20,12 @@ import (
 	"strings"
 )
 
+// These definitions must contain and be compatible with the string
+// values defined for pkg/pollicy/api/L4Proto
+
 const (
+	// ANY represents all protocols.
+	ANY    U8proto = 0
 	ICMP   U8proto = 1
 	TCP    U8proto = 6
 	UDP    U8proto = 17
@@ -28,6 +33,7 @@ const (
 )
 
 var protoNames = map[U8proto]string{
+	0:  "ANY",
 	1:  "ICMP",
 	6:  "TCP",
 	17: "UDP",
@@ -35,6 +41,8 @@ var protoNames = map[U8proto]string{
 }
 
 var ProtoIDs = map[string]U8proto{
+	"all":    0,
+	"any":    0,
 	"icmp":   1,
 	"tcp":    6,
 	"udp":    17,

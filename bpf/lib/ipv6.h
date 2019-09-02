@@ -99,26 +99,17 @@ static inline int __inline__ ipv6_hdrlen(struct __sk_buff *skb, int l3_off, __u8
 
 static inline void ipv6_addr_copy(union v6addr *dst, union v6addr *src)
 {
-	dst->p1 = src->p1;
-	dst->p2 = src->p2;
-	dst->p3 = src->p3;
-	dst->p4 = src->p4;
+	dst->d1 = src->d1;
+	dst->d2 = src->d2;
 }
 
-static inline int ipv6_addrcmp(union v6addr *a, union v6addr *b)
+static inline __u64 ipv6_addrcmp(union v6addr *a, union v6addr *b)
 {
-	int tmp;
+	__u64 tmp;
 
-	tmp = a->p1 - b->p1;
-	if (!tmp) {
-		tmp = a->p2 - b->p2;
-		if (!tmp) {
-			tmp = a->p3 - b->p3;
-			if (!tmp)
-				tmp = a->p4 - b->p4;
-		}
-	}
-
+	tmp = a->d1 - b->d1;
+	if (!tmp)
+		tmp = a->d2 - b->d2;
 	return tmp;
 }
 
@@ -131,6 +122,22 @@ static inline int ipv6_addr_in_net(union v6addr *addr, union v6addr *net, union 
 			&& (!mask->p3
 			    || (((addr->p3 & mask->p3) == net->p3)
 				&& (!mask->p4 || ((addr->p4 & mask->p4) == net->p4))))));
+}
+
+#define GET_PREFIX(PREFIX)						\
+	bpf_htonl(prefix <= 0 ? 0 : prefix < 32 ? ((1<<prefix) - 1) << (32-prefix)	\
+			      : 0xFFFFFFFF)
+
+static inline void ipv6_addr_clear_suffix(union v6addr *addr, int prefix)
+{
+	addr->p1 &= GET_PREFIX(prefix);
+	prefix -= 32;
+	addr->p2 &= GET_PREFIX(prefix);
+	prefix -= 32;
+	addr->p3 &= GET_PREFIX(prefix);
+	prefix -= 32;
+	addr->p4 &= GET_PREFIX(prefix);
+	prefix -= 32;
 }
 
 static inline int ipv6_match_prefix_96(const union v6addr *addr, const union v6addr *prefix)
@@ -158,21 +165,18 @@ static inline int ipv6_match_prefix_64(const union v6addr *addr, const union v6a
 	return !tmp;
 }
 
-
 static inline int ipv6_dec_hoplimit(struct __sk_buff *skb, int off)
 {
-	__u8 hoplimit, new_hl;
+	__u8 hl;
 
-	hoplimit = load_byte(skb, off + offsetof(struct ipv6hdr, hop_limit));
-	if (hoplimit <= 1) {
+	skb_load_bytes(skb, off + offsetof(struct ipv6hdr, hop_limit),
+		       &hl, sizeof(hl));
+	if (hl <= 1)
 		return 1;
-	}
-
-	new_hl = hoplimit - 1;
+	hl--;
 	if (skb_store_bytes(skb, off + offsetof(struct ipv6hdr, hop_limit),
-			    &new_hl, sizeof(new_hl), BPF_F_RECOMPUTE_CSUM) < 0)
+			    &hl, sizeof(hl), BPF_F_RECOMPUTE_CSUM) < 0)
 		return DROP_WRITE_ERROR;
-
 	return 0;
 }
 

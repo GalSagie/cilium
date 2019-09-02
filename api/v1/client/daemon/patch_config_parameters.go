@@ -6,10 +6,9 @@ package daemon
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"context"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
@@ -17,7 +16,7 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // NewPatchConfigParams creates a new PatchConfigParams object
@@ -65,7 +64,7 @@ for the patch config operation typically these are written to a http.Request
 type PatchConfigParams struct {
 
 	/*Configuration*/
-	Configuration *models.Configuration
+	Configuration *models.DaemonConfigurationSpec
 
 	timeout    time.Duration
 	Context    context.Context
@@ -106,13 +105,13 @@ func (o *PatchConfigParams) SetHTTPClient(client *http.Client) {
 }
 
 // WithConfiguration adds the configuration to the patch config params
-func (o *PatchConfigParams) WithConfiguration(configuration *models.Configuration) *PatchConfigParams {
+func (o *PatchConfigParams) WithConfiguration(configuration *models.DaemonConfigurationSpec) *PatchConfigParams {
 	o.SetConfiguration(configuration)
 	return o
 }
 
 // SetConfiguration adds the configuration to the patch config params
-func (o *PatchConfigParams) SetConfiguration(configuration *models.Configuration) {
+func (o *PatchConfigParams) SetConfiguration(configuration *models.DaemonConfigurationSpec) {
 	o.Configuration = configuration
 }
 
@@ -124,12 +123,10 @@ func (o *PatchConfigParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.R
 	}
 	var res []error
 
-	if o.Configuration == nil {
-		o.Configuration = new(models.Configuration)
-	}
-
-	if err := r.SetBodyParam(o.Configuration); err != nil {
-		return err
+	if o.Configuration != nil {
+		if err := r.SetBodyParam(o.Configuration); err != nil {
+			return err
+		}
 	}
 
 	if len(res) > 0 {

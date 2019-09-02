@@ -12,14 +12,14 @@
                 {"port": "80", "protocol": "tcp"}],
             "rules": {
                 "HTTP": [
-                    {"method": "GET", "path": "/public"}]
+                    {"method": "GET", "path": "/public.*"}]
             }
         }]
     }]
 },
 {
     "endpointSelector":
-        {"matchLabels":{"id.http2":""}},
+        {"matchLabels":{"id.httpd2":""}},
     "ingress": [{
         "fromEndpoints": [
             {"matchLabels":{"reserved:host":""}},
@@ -36,8 +36,25 @@
                   {"port": "80",   "protocol": "tcp"}],
             "rules": {
                 "HTTP": [
-                    {"method": "GET", "path": "/public"}]
+                    {"method": "GET", "path": "/public.*"}]
 	    }
+        }]
+    }]
+},
+{
+    "endpointSelector":
+    {"matchLabels":{"id.app3":""}},
+    "egress": [{
+        "toEndpoints": [
+            {"matchLabels":{"id.httpd3":""}}
+        ],
+        "toPorts": [{
+            "ports": [
+                {"port": "80",   "protocol": "tcp"}],
+            "rules": {
+                "HTTP": [
+                    {"method": "GET", "path": "/public.*"}]
+            }
         }]
     }]
 }]

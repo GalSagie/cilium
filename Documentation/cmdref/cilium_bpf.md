@@ -6,8 +6,13 @@ Direct access to local BPF maps
 
 ### Synopsis
 
-
 Direct access to local BPF maps
+
+### Options
+
+```
+  -h, --help   help for bpf
+```
 
 ### Options inherited from parent commands
 
@@ -18,11 +23,16 @@ Direct access to local BPF maps
 ```
 
 ### SEE ALSO
-* [cilium](cilium.html)	 - CLI
-* [cilium bpf ct](cilium_bpf_ct.html)	 - Connection tracking tables
-* [cilium bpf endpoint](cilium_bpf_endpoint.html)	 - Local endpoint map
-* [cilium bpf lb](cilium_bpf_lb.html)	 - Load-balancing configuration
-* [cilium bpf policy](cilium_bpf_policy.html)	 - Manage policy related BPF maps
-* [cilium bpf proxy](cilium_bpf_proxy.html)	 - Proxy configuration
-* [cilium bpf tunnel](cilium_bpf_tunnel.html)	 - Tunnel endpoint map
+
+* [cilium](../cilium)	 - CLI
+* [cilium bpf ct](../cilium_bpf_ct)	 - Connection tracking tables
+* [cilium bpf endpoint](../cilium_bpf_endpoint)	 - Local endpoint map
+* [cilium bpf ipcache](../cilium_bpf_ipcache)	 - Manage the IPCache mappings for IP/CIDR <-> Identity
+* [cilium bpf lb](../cilium_bpf_lb)	 - Load-balancing configuration
+* [cilium bpf metrics](../cilium_bpf_metrics)	 - BPF datapath traffic metrics
+* [cilium bpf nat](../cilium_bpf_nat)	 - NAT mapping tables
+* [cilium bpf policy](../cilium_bpf_policy)	 - Manage policy related BPF maps
+* [cilium bpf proxy](../cilium_bpf_proxy)	 - Proxy configuration
+* [cilium bpf sha](../cilium_bpf_sha)	 - Manage compiled BPF template objects
+* [cilium bpf tunnel](../cilium_bpf_tunnel)	 - Tunnel endpoint map
 

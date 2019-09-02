@@ -49,7 +49,7 @@ specs:
         rules:
           http:
           - method: GET
-            path: "^/reviews/[0-9]*$"
+            path: "/reviews/[0-9]*"
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
@@ -59,13 +59,15 @@ spec:
   replicas: 1
   template:
     metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
       labels:
         app: reviews
         version: v1
     spec:
       containers:
       - name: reviews
-        image: istio/examples-bookinfo-reviews-v1:0.2.8
+        image: docker.io/istio/examples-bookinfo-reviews-v1:1.10.1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9080

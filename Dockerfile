@@ -1,4 +1,9 @@
 #
+# cilium-envoy from github.com/cilium/proxy
+#
+FROM quay.io/cilium/cilium-envoy:b7a919ebdca3d3bbc6aae51357e78e9c603450ae as cilium-envoy
+
+#
 # Cilium incremental build. Should be fast given builder-deps is up-to-date!
 #
 # cilium-builder tag is the date on which the compatible build image
@@ -8,15 +13,19 @@
 # versions to be built while allowing the new versions to make changes
 # that are not backwards compatible.
 #
-FROM cilium/cilium-builder:2017-12-14 as builder
+FROM quay.io/cilium/cilium-builder:2019-08-13 as builder
 LABEL maintainer="maintainer@cilium.io"
 WORKDIR /go/src/github.com/cilium/cilium
-ADD . ./
+COPY . ./
+ARG LOCKDEBUG
+ARG V
+ARG LIBNETWORK_PLUGIN
 #
 # Please do not add any dependency updates before the 'make install' here,
 # as that will mess with caching for incremental builds!
 #
-RUN make PKG_BUILD=1 DESTDIR=/tmp/install clean-container build install
+RUN make LOCKDEBUG=$LOCKDEBUG PKG_BUILD=1 V=$V LIBNETWORK_PLUGIN=$LIBNETWORK_PLUGIN \
+    SKIP_DOCS=true DESTDIR=/tmp/install clean-container build-container install-container
 
 #
 # Cilium runtime install.
@@ -28,15 +37,17 @@ RUN make PKG_BUILD=1 DESTDIR=/tmp/install clean-container build install
 # built while allowing the new versions to make changes that are not
 # backwards compatible.
 #
-FROM cilium/cilium-runtime:2017-12-14
+FROM quay.io/cilium/cilium-runtime:2019-08-13
 LABEL maintainer="maintainer@cilium.io"
 COPY --from=builder /tmp/install /
-ADD plugins/cilium-cni/cni-install.sh /cni-install.sh
-ADD plugins/cilium-cni/cni-uninstall.sh /cni-uninstall.sh
+COPY --from=cilium-envoy / /
+COPY plugins/cilium-cni/cni-install.sh /cni-install.sh
+COPY plugins/cilium-cni/cni-uninstall.sh /cni-uninstall.sh
+COPY contrib/packaging/docker/init-container.sh /init-container.sh
 WORKDIR /root
-RUN groupadd -f cilium && \
-echo ". /etc/profile.d/bash_completion.sh" >> /root/.bashrc && \
-cilium completion bash >> /root/.bashrc
+RUN groupadd -f cilium \
+	&& echo ". /etc/profile.d/bash_completion.sh" >> /root/.bashrc \
+    && cilium completion bash >> /root/.bashrc \
+    && sysctl -w kernel.core_pattern=/tmp/core.%e.%p.%t
 ENV INITSYSTEM="SYSTEMD"
-
 CMD ["/usr/bin/cilium"]

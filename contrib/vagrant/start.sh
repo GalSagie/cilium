@@ -33,11 +33,12 @@ export 'IPV6_INTERNAL_CIDR'=${IPV4+"FD01::"}
 #   worker 1: FD02::1:0:0/96
 export 'CILIUM_IPV6_NODE_CIDR'=${CILIUM_IPV6_NODE_CIDR:-"FD02::"}
 # VM memory
-export 'VM_MEMORY'=${MEMORY:-3072}
+export 'VM_MEMORY'=${MEMORY:-4096}
 # Number of CPUs
 export 'VM_CPUS'=${CPUS:-2}
-# K8STAG tag is only set if K8S option is active
-export 'K8STAG'=${K8S+"-k8s"}
+# VM_BASENAME tag is only set if K8S option is active
+export 'VM_BASENAME'="runtime"
+export 'VM_BASENAME'=${K8S+"k8s"}
 # Set VAGRANT_DEFAULT_PROVIDER to virtualbox
 export 'VAGRANT_DEFAULT_PROVIDER'=${VAGRANT_DEFAULT_PROVIDER:-"virtualbox"}
 # Sets the default cilium TUNNEL_MODE to "vxlan"
@@ -49,8 +50,20 @@ export 'YES_TO_ALL'=${YES_TO_ALL:-"0"}
 export 'CILIUM_SCRIPT'=true
 # Sets the directory where the temporary setup scripts are created
 export 'CILIUM_TEMP'="${dir}"
-# Required bazel version
-export 'BAZEL_VERSION'=$(<envoy/BAZEL_VERSION)
+
+# Sets VM's Command wget with HTTPS_PROXY
+export 'VM_PROXY'="${VM_SET_PROXY}"
+
+# Sets the RELOAD env variable with 1 if there is any VM printed by
+# vagrant status.
+function set_reload_if_vm_exists(){
+    if [ -z "${RELOAD}" ]; then
+        if [[ $(vagrant status 2>/dev/null | wc -l) -gt 1 && \
+                ! $(vagrant status 2>/dev/null | grep "not created") ]]; then
+            RELOAD=1
+        fi
+    fi
+}
 
 # split_ipv4 splits an IPv4 address into a bash array and assigns it to ${1}.
 # Exits if ${2} is an invalid IPv4 address.
@@ -86,13 +99,9 @@ if [ -n "${K8S}" ]; then
 fi
 
 # Use of IPv6 'documentation block' to provide example
-if [ -n "\$(grep DISTRIB_RELEASE=14.04 /etc/lsb-release)" ]; then
-    ip -6 a a ${vm_ipv6}/16 dev eth1
-else
-    ip -6 a a ${vm_ipv6}/16 dev enp0s8
-fi
+ip -6 a a ${vm_ipv6}/16 dev enp0s8
 
-echo '${master_ipv6} cilium${K8STAG}-master' >> /etc/hosts
+echo '${master_ipv6} ${VM_BASENAME}1' >> /etc/hosts
 sysctl -w net.ipv6.conf.all.forwarding=1
 EOF
 }
@@ -111,18 +120,13 @@ function write_master_route(){
     if [ -z "${K8S}" ]; then
         cat <<EOF >> "${filename}"
 # Master route
-if [ -n "\$(grep DISTRIB_RELEASE=14.04 /etc/lsb-release)" ]; then
-    ip r a 10.${master_ipv4_suffix}.0.1/32 dev eth1
-    ip r a 10.${master_ipv4_suffix}.0.0/16 via 10.${master_ipv4_suffix}.0.1
-else
-    ip r a 10.${master_ipv4_suffix}.0.1/32 dev enp0s8
-    ip r a 10.${master_ipv4_suffix}.0.0/16 via 10.${master_ipv4_suffix}.0.1
-fi
+ip r a 10.${master_ipv4_suffix}.0.1/32 dev enp0s8
+ip r a 10.${master_ipv4_suffix}.0.0/16 via 10.${master_ipv4_suffix}.0.1
 EOF
     fi
 
     cat <<EOF >> "${filename}"
-echo "${worker_ipv6} cilium${K8STAG}-node-${node_index}" >> /etc/hosts
+echo "${worker_ipv6} ${VM_BASENAME}${node_index}" >> /etc/hosts
 
 EOF
 }
@@ -149,18 +153,13 @@ EOF
         worker_internal_ipv6=${IPV6_INTERNAL_CIDR}$(printf "%02X" "${i}")
         if [ -z "${K8S}" ]; then
             cat <<EOF >> "${filename}"
-if [ -n "\$(grep DISTRIB_RELEASE=14.04 /etc/lsb-release)" ]; then
-    ip r a 10.${i}.0.1/32 dev eth1
-else
-    ip r a 10.${i}.0.1/32 dev enp0s8
-fi
-
 ip r a 10.${i}.0.0/16 via 10.${i}.0.1
+ip r a 10.${i}.0.1/32 dev enp0s8
 EOF
         fi
 
         cat <<EOF >> "${filename}"
-echo "${worker_internal_ipv6} cilium${K8STAG}-node-${index}" >> /etc/hosts
+echo "${worker_internal_ipv6} ${VM_BASENAME}${index}" >> /etc/hosts
 EOF
     done
 
@@ -187,29 +186,6 @@ cd "${k8s_dir}"
 EOF
 }
 
-# write_install_nsenter writes the dependencies and installation for nsenter in
-# ${1}.
-function write_install_nsenter(){
-    filename="${1}"
-    cat <<EOF >> "${filename}"
-
-if [ -n "\${INSTALL}" ]; then
-    #Install nsenter
-    sudo apt-get -y install bison libncurses5-dev libslang2-dev gettext \
-    zlib1g-dev libselinux1-dev debhelper lsb-release pkg-config \
-    po-debconf autoconf automake autopoint libtool
-    wget -nv https://www.kernel.org/pub/linux/utils/util-linux/v2.30/util-linux-2.30.1.tar.gz
-    tar -xvzf util-linux-2.30.1.tar.gz
-    cd util-linux-2.30.1
-    ./autogen.sh
-    ./configure --without-python --disable-all-programs --enable-nsenter
-    make nsenter
-    sudo cp nsenter /usr/bin
-fi
-
-EOF
-}
-
 # write_k8s_install writes the k8s installation first half in ${2} and the
 # second half in ${3}. Changes the k8s temporary directory inside the VM,
 # defined in ${1}, owner and group to vagrant.
@@ -230,7 +206,7 @@ function write_k8s_install() {
         k8s_cluster_api_server_ip="FD03::1"
         k8s_cluster_dns_ip="FD03::A"
     fi
-    k8s_cluster_cidr=${k8s_cluster_cidr:-"10.0.0.0/10"}
+    k8s_cluster_cidr=${k8s_cluster_cidr:-"10.16.0.0/12"}
     k8s_node_cidr_mask_size=${k8s_node_cidr_mask_size:-"16"}
     k8s_service_cluster_ip_range=${k8s_service_cluster_ip_range:-"172.20.0.0/24"}
     k8s_cluster_api_server_ip=${k8s_cluster_api_server_ip:-"172.20.0.1"}
@@ -245,9 +221,16 @@ export K8S_NODE_CIDR_MASK_SIZE="${k8s_node_cidr_mask_size}"
 export K8S_SERVICE_CLUSTER_IP_RANGE="${k8s_service_cluster_ip_range}"
 export K8S_CLUSTER_API_SERVER_IP="${k8s_cluster_api_server_ip}"
 export K8S_CLUSTER_DNS_IP="${k8s_cluster_dns_ip}"
+export RUNTIME="${RUNTIME}"
 # Only do installation if RELOAD is not set
 if [ -z "${RELOAD}" ]; then
     export INSTALL="1"
+fi
+
+if [ -n "${VM_PROXY}" ]; then
+    export WGET="HTTPS_PROXY=${VM_PROXY} wget"
+else
+    export WGET="wget"
 fi
 export ETCD_CLEAN="${ETCD_CLEAN}"
 
@@ -255,9 +238,9 @@ export ETCD_CLEAN="${ETCD_CLEAN}"
 # allocating its own podCIDR without using the kubernetes allocated podCIDR.
 sudo service cilium stop
 EOF
-    write_install_nsenter "${filename}"
     cat <<EOF >> "${filename}"
-if [[ "\$(hostname)" -eq "cilium${K8STAG}-master" ]]; then
+if [[ "\$(hostname)" == "${VM_BASENAME}1" ]]; then
+    echo "\$(hostname)"
     "\${k8s_path}/00-create-certs.sh"
     "\${k8s_path}/01-install-etcd.sh"
     "\${k8s_path}/02-install-kubernetes-master.sh"
@@ -279,18 +262,25 @@ export K8S_NODE_CIDR_MASK_SIZE="${k8s_node_cidr_mask_size}"
 export K8S_SERVICE_CLUSTER_IP_RANGE="${k8s_service_cluster_ip_range}"
 export K8S_CLUSTER_API_SERVER_IP="${k8s_cluster_api_server_ip}"
 export K8S_CLUSTER_DNS_IP="${k8s_cluster_dns_ip}"
-export K8STAG="${K8STAG}"
+export RUNTIME="${RUNTIME}"
+export K8STAG="${VM_BASENAME}"
 export NWORKERS="${NWORKERS}"
 # Only do installation if RELOAD is not set
 if [ -z "${RELOAD}" ]; then
     export INSTALL="1"
 fi
+
+if [ -n "${VM_PROXY}" ]; then
+    export WGET="HTTPS_PROXY=${VM_PROXY} wget"
+else
+    export WGET="wget"
+fi
 export ETCD_CLEAN="${ETCD_CLEAN}"
 
 cd "${k8s_dir}"
 "\${k8s_path}/05-install-cilium.sh"
-if [[ "\$(hostname)" -eq "cilium${K8STAG}-master" ]]; then
-    "\${k8s_path}/06-install-kubedns.sh"
+if [[ "\$(hostname)" == "${VM_BASENAME}1" ]]; then
+    "\${k8s_path}/06-install-coredns.sh"
 else
     "\${k8s_path}/04-install-kubectl.sh"
 fi
@@ -303,42 +293,61 @@ function write_cilium_cfg() {
     ipv6_addr="${3}"
     filename="${4}"
 
-    cilium_options="--auto-ipv6-node-routes --debug-verbose flow"
+    cilium_options=" --debug --pprof --enable-k8s-event-handover --k8s-require-ipv4-pod-cidr --auto-direct-node-routes"
+    cilium_operator_options=" --debug"
 
     if [[ "${IPV4}" -eq "1" ]]; then
         if [[ -z "${K8S}" ]]; then
             cilium_options+=" --ipv4-range 10.${master_ipv4_suffix}.0.0/16"
         fi
     else
-        cilium_options+=" --disable-ipv4"
+        cilium_options+=" --enable-ipv4=false"
     fi
 
     if [ -n "${K8S}" ]; then
         cilium_options+=" --k8s-kubeconfig-path /var/lib/cilium/cilium.kubeconfig"
         cilium_options+=" --kvstore etcd"
         cilium_options+=" --kvstore-opt etcd.config=/var/lib/cilium/etcd-config.yml"
+        cilium_operator_options+=" --k8s-kubeconfig-path /var/lib/cilium/cilium.kubeconfig"
+        cilium_operator_options+=" --kvstore etcd"
+        cilium_operator_options+=" --kvstore-opt etcd.config=/var/lib/cilium/etcd-config.yml"
     else
         if [[ "${IPV4}" -eq "1" ]]; then
             cilium_options+=" --kvstore-opt consul.address=${MASTER_IPV4}:8500"
+            cilium_operator_options+=" --kvstore-opt consul.address=${MASTER_IPV4}:8500"
         else
             cilium_options+=" --kvstore-opt consul.address=[${ipv6_addr}]:8500"
+            cilium_operator_options+=" --kvstore-opt consul.address=[${ipv6_addr}]:8500"
         fi
         cilium_options+=" --kvstore consul"
+        cilium_operator_options+=" --kvstore consul"
     fi
+    # container runtime options
+    case "${RUNTIME}" in
+        "containerd" | "containerD")
+            cilium_options+=" --container-runtime=containerd --container-runtime-endpoint=containerd=/var/run/containerd/containerd.sock"
+            cat <<EOF >> "$filename"
+sed -i '4s+.*++' /lib/systemd/system/cilium.service
+EOF
+            ;;
+        "crio" | "cri-o")
+            cilium_options+=" --container-runtime=crio --container-runtime-endpoint=crio=/var/run/crio/crio.sock"
+            ;;
+        *)
+            cilium_options+=" --container-runtime=docker --container-runtime-endpoint=docker=unix:///var/run/docker.sock"
+            ;;
+    esac
+
 
     if [ "$LB" = 1 ]; then
         # The LB interface needs to be the "exposed" to the host
         # interface only for master node.
         # FIXME GH-1054
 #        if [ $((node_index)) -eq 1 ]; then
-#            ubuntu_1404_interface="-d eth2"
 #            ubuntu_1604_interface="-d enp0s9"
-#            ubuntu_1404_cilium_lb="--lb eth2"
 #            ubuntu_1604_cilium_lb="--lb enp0s9"
 #        else
-            ubuntu_1404_interface="-d eth2"
             ubuntu_1604_interface="-d enp0s9"
-            ubuntu_1404_cilium_lb=""
             ubuntu_1604_cilium_lb=""
 #        fi
     else
@@ -349,16 +358,11 @@ function write_cilium_cfg() {
 
 cat <<EOF >> "$filename"
 sleep 2s
-if [ -n "\$(grep DISTRIB_RELEASE=14.04 /etc/lsb-release)" ]; then
-    sed -i '/exec/d' /etc/init/cilium.conf
-    echo 'exec cilium-agent --debug ${ubuntu_1404_cilium_lb} ${ubuntu_1404_interface} ${cilium_options}' >> /etc/init/cilium.conf
-else
-    sed -i '9s+.*+ExecStart=/usr/bin/cilium-agent --debug \$CILIUM_OPTS+' /lib/systemd/system/cilium.service
-    echo "K8S_NODE_NAME=\$(hostname)" >> /etc/sysconfig/cilium
-    echo 'CILIUM_OPTS="${ubuntu_1604_cilium_lb} ${ubuntu_1604_interface} ${cilium_options}"' >> /etc/sysconfig/cilium
-    echo 'PATH=/usr/local/clang/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin' >> /etc/sysconfig/cilium
-    chmod 644 /etc/sysconfig/cilium
-fi
+echo "K8S_NODE_NAME=\$(hostname)" >> /etc/sysconfig/cilium
+echo 'CILIUM_OPTS="${ubuntu_1604_cilium_lb} ${ubuntu_1604_interface} ${cilium_options}"' >> /etc/sysconfig/cilium
+echo 'CILIUM_OPERATOR_OPTS="${cilium_operator_options}"' >> /etc/sysconfig/cilium
+echo 'PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin' >> /etc/sysconfig/cilium
+chmod 644 /etc/sysconfig/cilium
 
 # Wait for the node to have a podCIDR so that cilium can use the podCIDR
 # allocated by k8s
@@ -373,34 +377,16 @@ if [ -n "\${K8S}" ]; then
     done
 fi
 
+systemctl daemon-reload
 service cilium restart
-
-cilium_started=false
-
-for ((i = 0 ; i < 24; i++)); do
-    if cilium status > /dev/null 2>&1; then
-        cilium_started=true
-        break
-    fi
-    sleep 5s
-    echo "Waiting for Cilium daemon to come up..."
-done
-
-if [ "\$cilium_started" = true ] ; then
-    echo 'Cilium successfully started!'
-else
-    >&2 echo 'Timeout waiting for Cilium to start...'
-    journalctl -u cilium.service --since \$(systemctl show -p ActiveEnterTimestamp cilium.service | awk '{print \$2 \$3}')
-    >&2 echo 'Cilium failed to start'
-    exit 1
-fi
+/home/vagrant/go/src/github.com/cilium/cilium/test/provision/wait-cilium.sh
 EOF
 }
 
 function create_master(){
     split_ipv4 ipv4_array "${MASTER_IPV4}"
     get_cilium_node_addr master_cilium_ipv6 "${MASTER_IPV4}"
-    output_file="${dir}/cilium-master.sh"
+    output_file="${dir}/node-1.sh"
     write_netcfg_header "${MASTER_IPV6}" "${MASTER_IPV6}" "${output_file}"
 
     if [ -n "${NWORKERS}" ]; then
@@ -408,6 +394,7 @@ function create_master(){
     fi
 
     write_cilium_cfg 1 "${ipv4_array[3]}" "${master_cilium_ipv6}" "${output_file}"
+    echo "service cilium-operator restart" >> ${output_file}
 }
 
 function create_workers(){
@@ -417,7 +404,7 @@ function create_workers(){
     base_workers_ip=$(printf "%d.%d.%d." "${ipv4_array[0]}" "${ipv4_array[1]}" "${ipv4_array[2]}")
     if [ -n "${NWORKERS}" ]; then
         for i in `seq 2 $(( NWORKERS + 1 ))`; do
-            output_file="${dir}/node-start-${i}.sh"
+            output_file="${dir}/node-${i}.sh"
             worker_ip_suffix=$(( ipv4_array[3] + i - 1 ))
             worker_ipv6=${IPV6_INTERNAL_CIDR}$(printf '%02X' ${worker_ip_suffix})
             worker_host_ipv6=${IPV6_PUBLIC_CIDR}$(printf '%02X' ${worker_ip_suffix})
@@ -510,6 +497,7 @@ function vboxnet_addr_finder(){
     if [ -z "${IPV6_EXT}" ] && [ -z "${NFS}" ]; then
         return
     fi
+
     all_vbox_interfaces=$(VBoxManage list hostonlyifs | grep -E "^Name|IPV6Address|IPV6NetworkMaskPrefixLength" | awk -F" " '{print $2}')
     # all_vbox_interfaces format example:
     # vboxnet0
@@ -518,19 +506,48 @@ function vboxnet_addr_finder(){
     # vboxnet1
     # fd05:0000:0000:0000:0000:0000:0000:0001
     # 16
-    all_ipv6=$(echo "${all_vbox_interfaces}" | awk 'NR % 3 == 2')
-    line_ip=0
-    if [[ -n "${all_vbox_interfaces}" ]]; then
-        while read -r ip; do
-            line_ip=$(( $line_ip + 1 ))
-            if [ ! -z $(echo "${ip}" | grep -i "${IPV6_PUBLIC_CIDR/::/:}") ]; then
-                found=${line_ip}
-                net_mask=$(echo "${all_vbox_interfaces}" | awk "NR == 3 * ${line_ip}")
-                vboxnetname=$(echo "${all_vbox_interfaces}" | awk "NR == 3 * ${line_ip} - 2")
-                break
-            fi
-        done <<< "${all_ipv6}"
+    if [[ -n "${RELOAD}" ]]; then
+        all_ifaces=$(echo "${all_vbox_interfaces}" | awk 'NR % 3 == 1')
+        if [[ -n "${all_ifaces}" ]]; then
+            while read -r iface; do
+                iface_addresses=$(ip addr show "$iface" | grep inet6 | sed 's/.*inet6 \([a-fA-F0-9:/]\+\).*/\1/g')
+                # iface_addresses format example:
+                # fd00::1/64
+                # fe80::800:27ff:fe00:2/64
+                if [[ -z "${iface_addresses}" ]]; then
+                    # No inet6 addresses
+                    continue
+                fi
+                while read -r ip; do
+                    if [ ! -z $(echo "${ip}" | grep -i "${IPV6_PUBLIC_CIDR/::/:}") ]; then
+                        found="1"
+                        net_mask=$(echo "${ip}" | sed 's/.*\///')
+                        vboxnetname="${iface}"
+                        break
+                    fi
+                done <<< "${iface_addresses}"
+                if [[ -n "${found}" ]]; then
+                    break
+                fi
+            done <<< "${all_ifaces}"
+        fi
     fi
+    if [[ -z "${found}" ]]; then
+        all_ipv6=$(echo "${all_vbox_interfaces}" | awk 'NR % 3 == 2')
+        line_ip=0
+        if [[ -n "${all_vbox_interfaces}" ]]; then
+            while read -r ip; do
+                line_ip=$(( $line_ip + 1 ))
+                if [ ! -z $(echo "${ip}" | grep -i "${IPV6_PUBLIC_CIDR/::/:}") ]; then
+                    found=${line_ip}
+                    net_mask=$(echo "${all_vbox_interfaces}" | awk "NR == 3 * ${line_ip}")
+                    vboxnetname=$(echo "${all_vbox_interfaces}" | awk "NR == 3 * ${line_ip} - 2")
+                    break
+                fi
+            done <<< "${all_ipv6}"
+        fi
+    fi
+
     if [[ -z "${found}" ]]; then
         echo "WARN: VirtualBox interface with \"${IPV6_PUBLIC_CIDR}\" not found"
         if [ ${YES_TO_ALL} -eq "0" ]; then
@@ -582,16 +599,14 @@ ipv6_public_workers_addrs=()
 split_ipv4 ipv4_array "${MASTER_IPV4}"
 MASTER_IPV6="${IPV6_INTERNAL_CIDR}$(printf '%02X' ${ipv4_array[3]})"
 
+set_reload_if_vm_exists
+
 create_master
 create_workers
 set_vagrant_env
 create_k8s_config
 
 cd "${dir}/../.."
-
-# Store git version in a file so that .git does not need to be synced to the VM.
-# These will be ignored if we have .git in the build environment.
-make GIT_VERSION envoy/SOURCE_VERSION
 
 if [ -n "${RELOAD}" ]; then
     vagrant reload
@@ -601,5 +616,9 @@ elif [ -n "${PROVISION}" ]; then
     vagrant provision
 else
     vagrant up
+    if [ -n "${K8S}" ]; then
+		vagrant ssh k8s1 -- cat /home/vagrant/.kube/config | sed 's;server:.*:6443;server: https://k8s1:7443;g' > vagrant.kubeconfig
+		echo "Add '127.0.0.1 k8s1' to your /etc/hosts to use vagrant.kubeconfig file for kubectl"
+	fi
 fi
 

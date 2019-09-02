@@ -20,12 +20,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/cilium/cilium/common"
-	"github.com/cilium/cilium/daemon/defaults"
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/maps/tunnel"
+	"github.com/cilium/cilium/pkg/netns"
+	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/vishvananda/netlink"
 )
 
@@ -39,19 +44,158 @@ var cleanupCmd = &cobra.Command{
 	},
 }
 
-var force bool
+var (
+	cleanAll bool
+	cleanBPF bool
+	force    bool
+)
 
 const (
-	ciliumLinkPrefix = "cilium_"
-	hostLinkPrefix   = "lxc"
-	hostLinkLen      = len(hostLinkPrefix + "XXXXX")
-	tunnelMap        = "tunnel_endpoint_map"
-	cniConfig        = "/etc/cni/net.d/10-cilium-cni.conf"
+	allFlagName   = "all-state"
+	bpfFlagName   = "bpf-state"
+	forceFlagName = "force"
+
+	cleanCiliumEnvVar = "CLEAN_CILIUM_STATE"
+	cleanBpfEnvVar    = "CLEAN_CILIUM_BPF_STATE"
+)
+
+const (
+	ciliumLinkPrefix  = "cilium_"
+	ciliumNetNSPrefix = "cilium-"
+	hostLinkPrefix    = "lxc"
+	hostLinkLen       = len(hostLinkPrefix + "XXXXX")
+	cniConfigV1       = "/etc/cni/net.d/10-cilium-cni.conf"
+	cniConfigV2       = "/etc/cni/net.d/00-cilium-cni.conf"
+	cniConfigV3       = "/etc/cni/net.d/05-cilium-cni.conf"
 )
 
 func init() {
 	rootCmd.AddCommand(cleanupCmd)
-	cleanupCmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation")
+
+	cleanupCmd.Flags().BoolVarP(&cleanAll, allFlagName, "", false, "Remove all cilium state")
+	cleanupCmd.Flags().BoolVarP(&cleanBPF, bpfFlagName, "", false, "Remove BPF state")
+	cleanupCmd.Flags().BoolVarP(&force, forceFlagName, "f", false, "Skip confirmation")
+
+	option.BindEnv(allFlagName)
+	option.BindEnv(bpfFlagName)
+
+	bindEnv(cleanCiliumEnvVar, cleanCiliumEnvVar)
+	bindEnv(cleanBpfEnvVar, cleanBpfEnvVar)
+
+	if err := viper.BindPFlags(cleanupCmd.Flags()); err != nil {
+		Fatalf("viper failed to bind to flags: %v\n", err)
+	}
+}
+
+func bindEnv(flagName string, envName string) {
+	if err := viper.BindEnv(flagName, envName); err != nil {
+		Fatalf("Unable to bind flag %s to env variable %s: %s", flagName, envName, err)
+	}
+}
+
+// cleanupFunc represents a function to cleanup specific state items.
+type cleanupFunc func() error
+
+// cleanup represents a set of cleanup actions.
+type cleanup interface {
+	// whatWillBeRemoved contains descriptions of
+	// the removed state.
+	whatWillBeRemoved() []string
+	// cleanupFuncs contains a set of functions that
+	// carry out cleanup actions.
+	cleanupFuncs() []cleanupFunc
+}
+
+// bpfCleanup represents cleanup actions for BPF state.
+type bpfCleanup struct{}
+
+func (c bpfCleanup) whatWillBeRemoved() []string {
+	return []string{
+		fmt.Sprintf("all BPF maps in %s containing '%s' and '%s'",
+			bpf.MapPrefixPath(), ciliumLinkPrefix, tunnel.MapName),
+		fmt.Sprintf("mounted bpffs at %s", bpf.GetMapRoot()),
+	}
+}
+
+func (c bpfCleanup) cleanupFuncs() []cleanupFunc {
+	return []cleanupFunc{
+		removeAllMaps,
+	}
+}
+
+// ciliumCleanup represents cleanup actions for non-BPF state.
+type ciliumCleanup struct {
+	routes map[int]netlink.Route
+	links  map[int]netlink.Link
+	netNSs []string
+}
+
+func newCiliumCleanup() ciliumCleanup {
+	routes, links, err := findRoutesAndLinks()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+	}
+
+	netNSs, err := netns.ListNamedNetNSWithPrefix(ciliumNetNSPrefix)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+	}
+
+	return ciliumCleanup{routes, links, netNSs}
+}
+
+func (c ciliumCleanup) whatWillBeRemoved() []string {
+	toBeRemoved := []string{
+		fmt.Sprintf("mounted cgroupv2 at %s", defaults.DefaultCgroupRoot),
+		fmt.Sprintf("library code in %s", defaults.LibraryPath),
+		fmt.Sprintf("endpoint state in %s", defaults.RuntimePath),
+		fmt.Sprintf("CNI configuration at %s, %s, %s",
+			cniConfigV1, cniConfigV2, cniConfigV3),
+	}
+
+	if len(c.routes) > 0 {
+		section := "routes\n"
+		for _, v := range c.routes {
+			section += fmt.Sprintf("%v\n", v)
+		}
+		toBeRemoved = append(toBeRemoved, section)
+	}
+
+	if len(c.links) > 0 {
+		section := "links\n"
+		for _, v := range c.links {
+			section += fmt.Sprintf("%v\n", v)
+		}
+		toBeRemoved = append(toBeRemoved, section)
+	}
+
+	if len(c.netNSs) > 0 {
+		section := "network namespaces\n"
+		for _, n := range c.netNSs {
+			section += fmt.Sprintf("%s\n", n)
+		}
+		toBeRemoved = append(toBeRemoved, section)
+	}
+
+	return toBeRemoved
+}
+
+func (c ciliumCleanup) cleanupFuncs() []cleanupFunc {
+	cleanupRoutesAndLinks := func() error {
+		return removeRoutesAndLinks(c.routes, c.links)
+	}
+
+	cleanupNamedNetNSs := func() error {
+		return removeNamedNetNSs(c.netNSs)
+	}
+
+	return []cleanupFunc{
+		unmountCgroup,
+		removeDirs,
+		removeCNI,
+		cleanupRoutesAndLinks,
+		cleanupNamedNetNSs,
+	}
 }
 
 func runCleanup() {
@@ -62,55 +206,61 @@ func runCleanup() {
 		os.Exit(1)
 	}
 
-	routes, links, err := findRoutesAndLinks()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+	cleanAll = viper.GetBool(allFlagName) || viper.GetBool(cleanCiliumEnvVar)
+	cleanBPF = viper.GetBool(bpfFlagName) || viper.GetBool(cleanBpfEnvVar)
+
+	// if no flags are specifed then clean all
+	if (cleanAll || cleanBPF) == false {
+		cleanAll = true
 	}
 
-	showWhatWillBeRemoved(routes, links)
+	var cleanups []cleanup
+
+	if cleanAll || cleanBPF {
+		cleanups = append(cleanups, bpfCleanup{})
+	}
+
+	if cleanAll {
+		cleanups = append(cleanups, newCiliumCleanup())
+	}
+
+	if len(cleanups) == 0 {
+		return
+	}
+
+	showWhatWillBeRemoved(cleanups)
 	if !force && !confirmCleanup() {
 		return
+	}
+
+	var cleanupFuncs []cleanupFunc
+	for _, cleanup := range cleanups {
+		cleanupFuncs = append(cleanupFuncs, cleanup.cleanupFuncs()...)
 	}
 
 	// ENOENT and similar errors are ignored. Should print all other
 	// errors seen, but continue.  So that one remove function does not
 	// prevent the remaining from running.
-	type cleanupFunc func() error
-	checks := []cleanupFunc{removeAllMaps, unmountFS, removeDirs, removeCNI}
-	for _, clean := range checks {
+	for _, clean := range cleanupFuncs {
 		if err := clean(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		}
 	}
-
-	if err := removeRoutesAndLinks(routes, links); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-	}
 }
 
-func showWhatWillBeRemoved(routes map[int]netlink.Route, links map[int]netlink.Link) {
-	fmt.Printf("Warning: Destructive operation. You are about to remove:\n"+
-		"- all BPF maps in %s containing '%s' and '%s'\n"+
-		"- mounted bpffs at %s\n"+
-		"- library code in %s\n"+
-		"- endpoint state in %s\n"+
-		"- CNI configuration at %s\n",
-		bpf.MapPrefixPath(), ciliumLinkPrefix, tunnelMap, bpf.GetMapRoot(),
-		defaults.LibraryPath, defaults.RuntimePath, cniConfig)
+func showWhatWillBeRemoved(cleanups []cleanup) {
+	var toBeRemoved []string
 
-	if len(routes) > 0 {
-		fmt.Printf("- routes\n")
-		for _, v := range routes {
-			fmt.Printf("%v\n", v)
-		}
+	for _, cleanup := range cleanups {
+		toBeRemoved = append(toBeRemoved, cleanup.whatWillBeRemoved()...)
 	}
 
-	if len(links) > 0 {
-		fmt.Println("- links")
-		for _, v := range links {
-			fmt.Printf("%v\n", v)
-		}
+	warning := "Warning: Destructive operation. You are about to remove:\n"
+	for _, warn := range toBeRemoved {
+		warning += fmt.Sprintf("- %s\n", warn)
 	}
+
+	fmt.Printf(warning)
 }
 
 func confirmCleanup() bool {
@@ -121,11 +271,30 @@ func confirmCleanup() bool {
 }
 
 func removeCNI() error {
-	err := os.Remove(cniConfig)
+	os.Remove(cniConfigV1)
+	os.Remove(cniConfigV2)
+
+	err := os.Remove(cniConfigV3)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
+}
+
+func unmountCgroup() error {
+	cgroupRoot := defaults.DefaultCgroupRoot
+	cgroupRootStat, err := os.Stat(cgroupRoot)
+	if err != nil {
+		return nil
+	} else if !cgroupRootStat.IsDir() {
+		return fmt.Errorf("%s is a file which is not a directory", cgroupRoot)
+	}
+
+	log.Info("Trying to unmount ", cgroupRoot)
+	if err := syscall.Unmount(cgroupRoot, syscall.MNT_FORCE); err != nil {
+		return fmt.Errorf("Failed to unmount %s: %s", cgroupRoot, err)
+	}
+	return nil
 }
 
 func removeDirs() error {
@@ -145,13 +314,6 @@ func removeDirs() error {
 	return nil
 }
 
-func unmountFS() error {
-	if !bpf.IsBpffs(bpf.GetMapRoot()) {
-		return nil
-	}
-	return bpf.UnMountFS()
-}
-
 func removeAllMaps() error {
 	mapDir := bpf.MapPrefixPath()
 	maps, err := ioutil.ReadDir(mapDir)
@@ -165,7 +327,7 @@ func removeAllMaps() error {
 	for _, m := range maps {
 		name := m.Name()
 		// Skip non Cilium looking maps
-		if !strings.HasPrefix(name, ciliumLinkPrefix) && name != tunnelMap {
+		if !strings.HasPrefix(name, ciliumLinkPrefix) && name != tunnel.MapName {
 			continue
 		}
 		if err = os.Remove(filepath.Join(mapDir, name)); err != nil {
@@ -233,6 +395,19 @@ func removeRoutesAndLinks(routes map[int]netlink.Route, links map[int]netlink.Li
 			return err
 		}
 		fmt.Printf("removed link %s\n", link.Attrs().Name)
+	}
+	return nil
+}
+
+func removeNamedNetNSs(netNSs []string) error {
+	for _, n := range netNSs {
+		if err := netns.RemoveNetNSWithName(n); err != nil {
+			if strings.Contains(err.Error(), "No such file") {
+				continue
+			}
+			return err
+		}
+		fmt.Printf("removed network namespace %s\n", n)
 	}
 	return nil
 }

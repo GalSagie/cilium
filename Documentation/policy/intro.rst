@@ -1,62 +1,83 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 .. _policy_guide:
+
+.. _policy_enforcement_modes:
 
 Policy Enforcement Modes
 ========================
 
-Whether an endpoint accepts traffic from source is dependent upon the
-configuration of the agent and the policy. The agent can be put into the
-following three policy enforcement modes:
+The configuration of the Cilium agent and the Cilium Network Policy determines whether an endpoint accepts traffic from a source or not. The agent can be put into the following three policy enforcement modes:
 
 default
-  This is the behavior for policy enforcement when Cilium is launched without
-  any specified value for policy enforcement configuration. The following rule
-  applies:
+  This is the default behavior for policy enforcement when Cilium is launched without
+  any specified value for the policy enforcement configuration. The following rules
+  apply:
 
-  * If any rule selects an `endpoint` and the rule has an ingress
-    section, the endpoint goes into default deny at ingress
-  * If any rule selects an `endpoint` and the rule has an egress section, the
+  * If any rule selects an :ref:`endpoint` and the rule has an ingress
+    section, the endpoint goes into default deny at ingress.
+  * If any rule selects an :ref:`endpoint` and the rule has an egress section, the
     endpoint goes into default deny at egress.
 
-  This means that endpoints will start out without any restrictions, as soon as
+  This means that endpoints will start without any restrictions and as soon as
   a rule restricts their ability to receive traffic on ingress or to transmit
   traffic on egress, then the endpoint goes into whitelisting mode and all
   traffic must be explicitly allowed.
 
 always
-  With this mode, policy enforcement is enabled on all endpoints, even if no
+  With always mode, policy enforcement is enabled on all endpoints even if no
   rules select specific endpoints.
- 
-never
-  With this mode, policy enforcement is disabled on all endpoints, even if
-  rules do select specific endpoints. In other words, all traffic is allowed
-  from any source with respect to an endpoint.
 
-Policy enforcement is configurable at runtime by running:
+never
+  With never mode, policy enforcement is disabled on all endpoints, even if
+  rules do select specific endpoints. In other words, all traffic is allowed
+  from any source (on ingress) or destination (on egress).
+
+To configure the policy enforcement mode at runtime for all endpoints managed by a Cilium agent, use:
 
 .. code:: bash
 
     $ cilium config PolicyEnforcement={default,always,never}
 
-If you want to have a certain policy enforcement configuration value at
-launch-time, you can provide the following flag when you launch the Cilium
+If you want to configure the policy enforcement mode at start-time for a particular agent, provide the following flag when launching the Cilium
 daemon:
 
 .. code:: bash
 
     $ cilium-agent --enable-policy={default,always,never} [...]
 
+Similarly, you can enable the policy enforcement mode across a Kubernetes cluster by including the parameter above in the Cilium DaemonSet.
+
+.. code:: yaml
+
+    - name: CILIUM_ENABLE_POLICY
+      value: always
+
+
 .. _policy_rule:
 
 Rule Basics
 ===========
 
-All policy rules share a common base type which specifies what endpoints the
-rule applies to and also carries common metadata to identify the rule.
+All policy rules are based upon a whitelist model, that is, each rule in the
+policy allows traffic that matches the rule. If two rules exist, and one
+would match a broader set of traffic, then all traffic matching the broader
+rule will be allowed. If there is an intersection between two or more rules,
+then traffic matching the union of those rules will be allowed. Finally, if
+traffic does not match any of the rules, it will be dropped pursuant to the
+`policy_enforcement_modes`.
 
-Each rule is split into an ingress section which contains the rules which must
-be applied at ingress and egress of all endpoints matching the endpoint
-selector. Either ingress, egress, or both can be provided. If both ingress and
-egress are omitted, the rule has no effect.
+Policy rules share a common base type which specifies which endpoints the
+rule applies to and common metadata to identify the rule. Each rule is split
+into an ingress section and an egress section. The ingress section contains
+the rules which must be applied to traffic entering the endpoint, and the
+egress section contains rules applied to traffic coming from the endpoint
+matching the endpoint selector. Either ingress, egress, or both can be
+provided. If both ingress and egress are omitted, the rule has no effect.
 
 .. code-block:: go
 
@@ -96,10 +117,9 @@ egress are omitted, the rule has no effect.
 ----
 
 endpointSelector
-  Selects the endpoints to which the policy rules contained must be applied to.
-  All endpoints which match the labels specified in the ``endpointSelector``
-  will have the policy rules applied to. See the `LabelSelector` section for
-  additional details.
+  Selects the endpoints which the policy rules apply to. The policy rules
+  will be applied to all endpoints which match the labels specified in the
+  `endpointSelector`. See the `LabelSelector` section for additional details.
 
 ingress
   List of rules which must apply at ingress of the endpoint, i.e. to all
@@ -111,9 +131,9 @@ egress
 
 labels
   Labels are used to identify the rule. Rules can be listed and deleted by
-  labels. Policy rules which are imported via :ref:`k8s_policy` automatically
-  get the label ``io.cilium.k8s-policy-name=NAME`` assigned where ``NAME``
-  corresponds to the name specified in the `NetworkPolicy` or
+  labels. Policy rules which are imported via :ref:`kubernetes<k8s_policy>`
+  automatically get the label ``io.cilium.k8s.policy.name=NAME`` assigned where
+  ``NAME`` corresponds to the name specified in the `NetworkPolicy` or
   `CiliumNetworkPolicy` resource.
 
 description
@@ -127,6 +147,7 @@ description
 Endpoint Selector
 -----------------
 
-The Endpoint Selector is based off on LabelSelector of Kubernetes. It is called
-Endpoint Selector because it only applies to labels associated with
-`endpoints`.
+The Endpoint Selector is based on the `Kubernetes LabelSelector
+<https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors>`_.
+It is called Endpoint Selector because it only applies to labels associated
+with `endpoints`.

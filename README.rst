@@ -1,6 +1,6 @@
 |logo|
 
-|build-status| |go-report| |go-doc| |rtd| |apache| |gpl| |slack|
+|cii| |build-status| |pulls| |slack| |go-report| |go-doc| |rtd| |apache| |gpl|
 
 Cilium is open source software for providing and transparently securing network
 connectivity and loadbalancing between application workloads such as
@@ -13,7 +13,7 @@ A new Linux kernel technology called BPF is at the foundation of Cilium. It
 supports dynamic insertion of BPF bytecode into the Linux kernel at various
 integration points such as: network IO, application sockets, and tracepoints to
 implement security, networking and visibility logic. BPF is highly efficient
-and flexible. To learn more about BPF, read more in our our extensive
+and flexible. To learn more about BPF, read more in our extensive
 `BPF and XDP Reference Guide`_.
 
 .. image:: https://cdn.rawgit.com/cilium/cilium/master/Documentation/images/cilium-arch.png
@@ -55,7 +55,7 @@ the cluster.
 
 In order to avoid this situation which limits scale, Cilium assigns a security
 identity to groups of application containers which share identical security
-polices. The identity is then associated with all network packets emitted by
+policies. The identity is then associated with all network packets emitted by
 the application containers, allowing to validate the identity at the receiving
 node. Security identity management is performed using a key-value store.
 
@@ -106,6 +106,8 @@ external services. The loadbalancing is implemented using BPF using efficient
 hashtables allowing for almost unlimited scale and supports direct server
 return (DSR) if the loadbalancing operation is not performed on the source
 host.
+*Note: load balancing requires connection tracking to be enabled. This is the
+default.*
 
 Monitoring and Troubleshooting
 ------------------------------
@@ -118,7 +120,7 @@ tooling to provide:
 
 - Event monitoring with metadata: When a packet is dropped, the tool doesn't
   just report the source and destination IP of the packet, the tool provides
-  the full label information of both the sender and receiving among a lot of
+  the full label information of both the sender and receiver among a lot of
   other information.
 
 - Policy decision tracing: Why is a packet being dropped or a request rejected.
@@ -134,7 +136,6 @@ Integrations
 * Network plugin integrations: CNI_, libnetwork_
 * Container runtime events: containerd_
 * Kubernetes: NetworkPolicy_, Labels_, Ingress_, Service_
-* Logging: syslog, fluentd_
 
 .. _CNI: https://github.com/containernetworking/cni
 .. _libnetwork: https://github.com/docker/libnetwork
@@ -143,8 +144,7 @@ Integrations
 .. _Ingress: https://kubernetes.io/docs/concepts/services-networking/ingress/
 .. _NetworkPolicy: https://kubernetes.io/docs/concepts/services-networking/network-policies/
 .. _Labels: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
-.. _fluentd: http://www.fluentd.org/
-.. _`Layer 7 Policy`: http://docs.cilium.io/en/latest/policy/#layer-7
+.. _`Layer 7 Policy`: http://docs.cilium.io/en/stable/policy/#layer-7
 
 .. end-functionality-overview
 
@@ -181,7 +181,7 @@ kernel version 4.8.0 or newer (the latest current stable Linux kernel is
 4.14.x).
 
 Many Linux distributions including CoreOS, Debian, Docker's LinuxKit, Fedora,
-and Ubuntu already ship kernel versions >= 4.8.x. You can check your Linux
+openSUSE and Ubuntu already ship kernel versions >= 4.8.x. You can check your Linux
 kernel version by running ``uname -a``. If you are not yet running a recent
 enough kernel, check the Documentation of your Linux distribution on how to run
 Linux kernel 4.9.x or later.
@@ -200,6 +200,7 @@ performance packet processor in the Linux kernel networking data path.
 
 Further information about BPF and XDP targeted for developers can be found in
 the `BPF and XDP Reference Guide`_.
+
 
 Further Reading
 ===============
@@ -220,20 +221,20 @@ Presentations
 -------------
 
 * DockerCon, Austin TX, Apr 2017 - Cilium - Network and Application Security with BPF and XDP: `Slides
-  <https://www.slideshare.net/ThomasGraf5/dockercon-2017-cilium-network-and-application-security-with-bpf-and-xdp>`_, `Video <https://www.youtube.com/watch?v=ilKlmTDdFgk>`_
+  <https://www.slideshare.net/ThomasGraf5/dockercon-2017-cilium-network-and-application-security-with-bpf-and-xdp>`__, `Video <https://www.youtube.com/watch?v=ilKlmTDdFgk>`__
 * CNCF/KubeCon Meetup, Berlin, Mar 2017 - Linux Native, HTTP Aware Network Security:
-  `Slides <https://www.slideshare.net/ThomasGraf5/linux-native-http-aware-network-security>`_, `Video <https://www.youtube.com/watch?v=Yf_INdTWIHI>`_
+  `Slides <https://www.slideshare.net/ThomasGraf5/linux-native-http-aware-network-security>`__, `Video <https://www.youtube.com/watch?v=Yf_INdTWIHI>`__
 * Docker Distributed Systems Summit, Berlin, Oct 2016:
-  `Slides <http://www.slideshare.net/Docker/cilium-bpf-xdp-for-containers-66969823>`_, `Video <https://www.youtube.com/watch?v=TnJF7ht3ZYc&list=PLkA60AVN3hh8oPas3cq2VA9xB7WazcIgs&index=7>`_
-* NetDev1.2, Tokyo, Sep 2016 - cls_bpf/eBPF updates since netdev 1.1: `Slides <http://borkmann.ch/talks/2016_tcws.pdf>`_, `Video <https://youtu.be/gwzaKXWIelc?t=12m55s>`_
-* NetDev1.2, Tokyo, Sep 2016 - Advanced programmability and recent updates with tc’s cls_bpf: `Slides <http://borkmann.ch/talks/2016_netdev2.pdf>`_, `Video <https://www.youtube.com/watch?v=GwT9hRiqdUo>`_
-* ContainerCon NA, Toronto, Aug 2016 - Fast IPv6 container networking with BPF & XDP: `Slides <http://www.slideshare.net/ThomasGraf5/cilium-fast-ipv6-container-networking-with-bpf-and-xdp>`_
+  `Slides <http://www.slideshare.net/Docker/cilium-bpf-xdp-for-containers-66969823>`__, `Video <https://www.youtube.com/watch?v=TnJF7ht3ZYc&list=PLkA60AVN3hh8oPas3cq2VA9xB7WazcIgs&index=7>`__
+* NetDev1.2, Tokyo, Sep 2016 - cls_bpf/eBPF updates since netdev 1.1: `Slides <http://borkmann.ch/talks/2016_tcws.pdf>`__, `Video <https://youtu.be/gwzaKXWIelc?t=12m55s>`__
+* NetDev1.2, Tokyo, Sep 2016 - Advanced programmability and recent updates with tc’s cls_bpf: `Slides <http://borkmann.ch/talks/2016_netdev2.pdf>`__, `Video <https://www.youtube.com/watch?v=GwT9hRiqdUo>`__
+* ContainerCon NA, Toronto, Aug 2016 - Fast IPv6 container networking with BPF & XDP: `Slides <http://www.slideshare.net/ThomasGraf5/cilium-fast-ipv6-container-networking-with-bpf-and-xdp>`__
 
 Podcasts
 --------
 
-* Software Gone Wild by Ivan Pepelnjak, Oct 2016: `Blog <http://blog.ipspace.net/2016/10/fast-linux-packet-forwarding-with.html>`_, `MP3 <http://media.blubrry.com/ipspace/stream.ipspace.net/nuggets/podcast/Show_64-Cilium_with_Thomas_Graf.mp3>`_
-* OVS Orbit by Ben Pfaff, May 2016: `Blog <https://ovsorbit.benpfaff.org/#e4>`_, `MP3 <https://ovsorbit.benpfaff.org/episode-4.mp3>`_
+* Software Gone Wild by Ivan Pepelnjak, Oct 2016: `Blog <http://blog.ipspace.net/2016/10/fast-linux-packet-forwarding-with.html>`__, `MP3 <http://media.blubrry.com/ipspace/stream.ipspace.net/nuggets/podcast/Show_64-Cilium_with_Thomas_Graf.mp3>`__
+* OVS Orbit by Ben Pfaff, May 2016: `Blog <https://ovsorbit.benpfaff.org/#e4>`__, `MP3 <https://ovsorbit.benpfaff.org/episode-4.mp3>`__
 
 Community blog posts
 --------------------
@@ -245,17 +246,28 @@ Community blog posts
 
 .. further-reading-end
 
-Weekly Hangout
-==============
+Community
+=========
+
+Slack
+-----
+
+Join the Cilium `Slack channel <https://cilium.herokuapp.com/>`_ to chat with
+Cilium developers and other Cilium users. This is a good place to learn about
+Cilium, ask questions, and share your experiences.
+
+Special Interest Groups (SIG)
+-----------------------------
+
+See `Special Interest groups
+<https://docs.cilium.io/en/stable/community/#special-interest-groups>`_ for a list of all SIGs and their meeting times.
+
+Weekly Developer meeting
+------------------------
 * The developer community is hanging out on zoom on a weekly basis to chat.
   Everybody is welcome.
 * Weekly, Monday, 9:00 am PT, 12:00 pm (noon) ET, 6:00 pm CEST
-* `Join zoom <https://zoom.us/j/344163933>`_
-
-Contact
-=======
-
-If you have any questions feel free to contact us on `Slack <https://cilium.herokuapp.com/>`_.
+* `Join zoom <https://zoom.us/j/328820525>`_
 
 License
 =======
@@ -264,23 +276,23 @@ The cilium user space components are licensed under the
 `Apache License, Version 2.0 <LICENSE>`_. The BPF code templates are licensed
 under the `General Public License, Version 2.0 <bpf/COPYING>`_.
 
-.. _`Why Cilium?`: http://docs.cilium.io/en/latest/intro/#why-cilium
-.. _`Getting Started`: http://docs.cilium.io/en/latest/gettingstarted/
-.. _`Architecture and Concepts`: http://docs.cilium.io/en/latest/concepts/
-.. _`Installing Cilium`: http://cilium.readthedocs.io/en/latest/install/
+.. _`Why Cilium?`: http://docs.cilium.io/en/stable/intro/#why-cilium
+.. _`Getting Started`: http://docs.cilium.io/en/stable/gettingstarted/
+.. _`Architecture and Concepts`: http://docs.cilium.io/en/stable/concepts/
+.. _`Installing Cilium`: http://docs.cilium.io/en/stable/gettingstarted/#installation
 .. _`Frequently Asked Questions`: https://github.com/cilium/cilium/issues?utf8=%E2%9C%93&q=is%3Aissue+label%3Akind%2Fquestion+
-.. _Contributing: http://docs.cilium.io/en/latest/contributing
-.. _Prerequisites: http://docs.cilium.io/en/stable/install/#system-requirements
-.. _`BPF and XDP Reference Guide`: http://docs.cilium.io/en/latest/bpf/
+.. _Contributing: http://docs.cilium.io/en/stable/contributing/contributing/
+.. _Prerequisites: http://docs.cilium.io/en/doc-1.0/install/system_requirements
+.. _`BPF and XDP Reference Guide`: http://docs.cilium.io/en/stable/bpf/
 
 .. |logo| image:: https://cdn.rawgit.com/cilium/cilium/master/Documentation/images/logo.svg
     :alt: Cilium Logo
     :width: 350px
 
-.. |build-status| image:: https://jenkins.cilium.io/job/cilium/job/cilium/job/master/badge/icon
+.. |build-status| image:: https://jenkins.cilium.io/job/cilium-ginkgo/job/cilium/job/master/badge/icon
     :alt: Build Status
     :scale: 100%
-    :target: https://jenkins.cilium.io/job/cilium/job/cilium/job/master/
+    :target: https://jenkins.cilium.io/job/cilium-ginkgo/job/cilium/job/master/
 
 .. |go-report| image:: https://goreportcard.com/badge/github.com/cilium/cilium
     :alt: Go Report Card
@@ -292,7 +304,7 @@ under the `General Public License, Version 2.0 <bpf/COPYING>`_.
 
 .. |rtd| image:: https://readthedocs.org/projects/docs/badge/?version=latest
     :alt: Read the Docs
-    :target: http://cilium.readthedocs.io/en/latest/
+    :target: http://docs.cilium.io/
 
 .. |apache| image:: https://img.shields.io/badge/license-Apache-blue.svg
     :alt: Apache licensed
@@ -305,3 +317,11 @@ under the `General Public License, Version 2.0 <bpf/COPYING>`_.
 .. |slack| image:: https://cilium.herokuapp.com/badge.svg
     :alt: Join the Cilium slack channel
     :target: https://cilium.herokuapp.com/
+
+.. |cii| image:: https://bestpractices.coreinfrastructure.org/projects/1269/badge
+    :alt: CII Best Practices
+    :target: https://bestpractices.coreinfrastructure.org/projects/1269
+
+.. |pulls| image:: https://img.shields.io/docker/pulls/cilium/cilium.svg
+    :alt: Cilium pulls
+    :target: https://hub.docker.com/r/cilium/cilium/tags/

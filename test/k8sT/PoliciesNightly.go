@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,50 +16,43 @@ package k8sTest
 
 import (
 	"fmt"
-	"sync"
+	"time"
 
+	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
 	"github.com/cilium/cilium/test/helpers/policygen"
 
-	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
 )
 
 var _ = Describe("NightlyPolicies", func() {
 
 	var kubectl *helpers.Kubectl
-	var logger *logrus.Entry
-	var once sync.Once
+	var timeout = 10 * time.Minute
 
-	initialize := func() {
-		logger = log.WithFields(logrus.Fields{"testName": "NightlyK8sPolicies"})
-		logger.Info("Starting")
-
+	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
-		ciliumPath := kubectl.ManifestGet("cilium_ds.yaml")
-		kubectl.Apply(ciliumPath)
-		_, err := kubectl.WaitforPods(helpers.KubeSystemNamespace, "-l k8s-app=cilium", 600)
-		Expect(err).Should(BeNil())
-
-		err = kubectl.WaitKubeDNS()
-		Expect(err).Should(BeNil())
-	}
-
-	BeforeEach(func() {
-		once.Do(initialize)
+		DeployCiliumAndDNS(kubectl)
 	})
 
-	AfterEach(func() {
-		if CurrentGinkgoTestDescription().Failed {
-			ciliumPod, _ := kubectl.GetCiliumPodOnNode(helpers.KubeSystemNamespace, "k8s1")
-			kubectl.CiliumReport("kube-system", ciliumPod, []string{
-				"cilium policy get",
-				"cilium endpoint list",
-				"cilium service list"})
-		}
-		err := kubectl.WaitCleanAllTerminatingPods()
-		Expect(err).To(BeNil(), "Terminating containers are not deleted after timeout")
+	AfterFailed(func() {
+		kubectl.CiliumReport(helpers.KubeSystemNamespace,
+			"cilium endpoint list",
+			"cilium service list")
+	})
+
+	JustAfterEach(func() {
+		kubectl.ValidateNoErrorsInLogs(CurrentGinkgoTestDescription().Duration)
+	})
+
+	AfterAll(func() {
+		// Delete all pods created
+		kubectl.Exec(fmt.Sprintf(
+			"%s delete pods,svc,cnp -n %s -l test=policygen",
+			helpers.KubectlCmd, helpers.DefaultNamespace))
+		err := kubectl.WaitCleanAllTerminatingPods(timeout)
+		Expect(err).To(BeNil(), "Cannot clean pods during timeout")
+		kubectl.CloseSSHClient()
 	})
 
 	Context("PolicyEnforcement default", func() {

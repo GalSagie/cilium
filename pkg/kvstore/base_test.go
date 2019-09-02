@@ -1,4 +1,4 @@
-// Copyright 2016-2018 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package kvstore
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/cilium/cilium/pkg/comparator"
+	"github.com/cilium/cilium/pkg/checker"
+
 	. "gopkg.in/check.v1"
 )
 
@@ -34,7 +38,7 @@ func (s *BaseTests) TestLock(c *C) {
 	defer DeletePrefix(prefix)
 
 	for i := 0; i < 10; i++ {
-		lock, err := LockPath(fmt.Sprintf("%sfoo/%d", prefix, i))
+		lock, err := LockPath(context.Background(), fmt.Sprintf("%sfoo/%d", prefix, i))
 		c.Assert(err, IsNil)
 		c.Assert(lock, Not(IsNil))
 		lock.Unlock()
@@ -56,28 +60,30 @@ func (s *BaseTests) TestGetSet(c *C) {
 	DeletePrefix(prefix)
 	defer DeletePrefix(prefix)
 
-	val, err := GetPrefix(prefix)
+	key, val, err := GetPrefix(context.Background(), prefix)
 	c.Assert(err, IsNil)
 	c.Assert(val, IsNil)
+	c.Assert(key, Equals, "")
 
 	for i := 0; i < maxID; i++ {
 		val, err = Get(testKey(prefix, i))
 		c.Assert(err, IsNil)
 		c.Assert(val, IsNil)
 
-		val, err = GetPrefix(testKey(prefix, i))
+		key, val, err = GetPrefix(context.Background(), testKey(prefix, i))
 		c.Assert(err, IsNil)
 		c.Assert(val, IsNil)
+		c.Assert(key, Equals, "")
 
 		c.Assert(Set(testKey(prefix, i), testValue(i)), IsNil)
 
 		val, err = Get(testKey(prefix, i))
 		c.Assert(err, IsNil)
-		c.Assert(val, DeepEquals, testValue(i))
+		c.Assert(val, checker.DeepEquals, testValue(i))
 
 		val, err = Get(testKey(prefix, i))
 		c.Assert(err, IsNil)
-		c.Assert(val, DeepEquals, testValue(i))
+		c.Assert(val, checker.DeepEquals, testValue(i))
 	}
 
 	for i := 0; i < maxID; i++ {
@@ -87,14 +93,50 @@ func (s *BaseTests) TestGetSet(c *C) {
 		c.Assert(err, IsNil)
 		c.Assert(val, IsNil)
 
-		val, err = GetPrefix(testKey(prefix, i))
+		key, val, err = GetPrefix(context.Background(), testKey(prefix, i))
 		c.Assert(err, IsNil)
 		c.Assert(val, IsNil)
+		c.Assert(key, Equals, "")
 	}
 
-	val, err = GetPrefix(prefix)
+	key, val, err = GetPrefix(context.Background(), prefix)
 	c.Assert(err, IsNil)
 	c.Assert(val, IsNil)
+	c.Assert(key, Equals, "")
+}
+
+func (s *BaseTests) TestGetPrefix(c *C) {
+	prefix := "unit-test/"
+
+	DeletePrefix(prefix)
+	defer DeletePrefix(prefix)
+
+	key, val, err := GetPrefix(context.Background(), prefix)
+	c.Assert(err, IsNil)
+	c.Assert(val, IsNil)
+	c.Assert(key, Equals, "")
+
+	// create
+	labelsLong := "foo;/;bar;"
+	labelsShort := "foo;/"
+	testKey := fmt.Sprintf("%s%s/%010d", prefix, labelsLong, 0)
+	c.Assert(Update(context.Background(), testKey, testValue(0), true), IsNil)
+
+	val, err = Get(testKey)
+	c.Assert(err, IsNil)
+	c.Assert(val, checker.DeepEquals, testValue(0))
+
+	prefixes := []string{
+		prefix,
+		fmt.Sprintf("%s%s", prefix, labelsLong),
+		fmt.Sprintf("%s%s", prefix, labelsShort),
+	}
+	for _, p := range prefixes {
+		key, val, err = GetPrefix(context.Background(), p)
+		c.Assert(err, IsNil)
+		c.Assert(val, checker.DeepEquals, testValue(0))
+		c.Assert(key, Equals, testKey)
+	}
 }
 
 func (s *BaseTests) BenchmarkGet(c *C) {
@@ -129,23 +171,24 @@ func (s *BaseTests) TestUpdate(c *C) {
 	DeletePrefix(prefix)
 	defer DeletePrefix(prefix)
 
-	val, err := GetPrefix(prefix)
+	key, val, err := GetPrefix(context.Background(), prefix)
 	c.Assert(err, IsNil)
 	c.Assert(val, IsNil)
+	c.Assert(key, Equals, "")
 
 	// create
-	c.Assert(Update(testKey(prefix, 0), testValue(0), true), IsNil)
+	c.Assert(Update(context.Background(), testKey(prefix, 0), testValue(0), true), IsNil)
 
 	val, err = Get(testKey(prefix, 0))
 	c.Assert(err, IsNil)
-	c.Assert(val, DeepEquals, testValue(0))
+	c.Assert(val, checker.DeepEquals, testValue(0))
 
 	// update
-	c.Assert(Update(testKey(prefix, 0), testValue(0), true), IsNil)
+	c.Assert(Update(context.Background(), testKey(prefix, 0), testValue(0), true), IsNil)
 
 	val, err = Get(testKey(prefix, 0))
 	c.Assert(err, IsNil)
-	c.Assert(val, DeepEquals, testValue(0))
+	c.Assert(val, checker.DeepEquals, testValue(0))
 }
 
 func (s *BaseTests) TestCreateOnly(c *C) {
@@ -154,21 +197,26 @@ func (s *BaseTests) TestCreateOnly(c *C) {
 	DeletePrefix(prefix)
 	defer DeletePrefix(prefix)
 
-	val, err := GetPrefix(prefix)
+	key, val, err := GetPrefix(context.Background(), prefix)
 	c.Assert(err, IsNil)
 	c.Assert(val, IsNil)
+	c.Assert(key, Equals, "")
 
-	c.Assert(CreateOnly(testKey(prefix, 0), testValue(0), false), IsNil)
+	success, err := CreateOnly(context.Background(), testKey(prefix, 0), testValue(0), false)
+	c.Assert(err, IsNil)
+	c.Assert(success, Equals, true)
 
 	val, err = Get(testKey(prefix, 0))
 	c.Assert(err, IsNil)
-	c.Assert(val, DeepEquals, testValue(0))
+	c.Assert(val, checker.DeepEquals, testValue(0))
 
-	c.Assert(CreateOnly(testKey(prefix, 0), testValue(1), false), Not(IsNil))
+	success, err = CreateOnly(context.Background(), testKey(prefix, 0), testValue(1), false)
+	c.Assert(err, IsNil)
+	c.Assert(success, Equals, false)
 
 	val, err = Get(testKey(prefix, 0))
 	c.Assert(err, IsNil)
-	c.Assert(val, DeepEquals, testValue(0))
+	c.Assert(val, checker.DeepEquals, testValue(0))
 
 	// key 1 does not exist so CreateIfExists should fail
 	c.Assert(CreateIfExists(testKey(prefix, 1), testKey(prefix, 2), testValue(2), false), Not(IsNil))
@@ -182,13 +230,7 @@ func (s *BaseTests) TestCreateOnly(c *C) {
 
 	val, err = Get(testKey(prefix, 2))
 	c.Assert(err, IsNil)
-	c.Assert(val, DeepEquals, testValue(2))
-}
-
-func drainEvents(w *Watcher) {
-	for len(w.Events) > 0 {
-		<-w.Events
-	}
+	c.Assert(val, checker.DeepEquals, testValue(2))
 }
 
 func expectEvent(c *C, w *Watcher, typ EventType, key string, val []byte) {
@@ -197,11 +239,11 @@ func expectEvent(c *C, w *Watcher, typ EventType, key string, val []byte) {
 		c.Assert(event.Typ, Equals, typ)
 
 		if event.Typ != EventTypeListDone {
-			c.Assert(event.Key, comparator.DeepEquals, key)
+			c.Assert(event.Key, checker.DeepEquals, key)
 
 			// etcd does not provide the value of deleted keys
 			if selectedModule == "consul" {
-				c.Assert(event.Value, comparator.DeepEquals, val)
+				c.Assert(event.Value, checker.DeepEquals, val)
 			}
 		}
 	case <-time.After(10 * time.Second):
@@ -216,8 +258,9 @@ func (s *BaseTests) TestListAndWatch(c *C) {
 	DeletePrefix("foo2/")
 	defer DeletePrefix("foo2/")
 
-	err := CreateOnly(key1, val1, false)
+	success, err := CreateOnly(context.Background(), key1, val1, false)
 	c.Assert(err, IsNil)
+	c.Assert(success, Equals, true)
 
 	w := ListAndWatch("testWatcher2", "foo2/", 100)
 	c.Assert(c, Not(IsNil))
@@ -225,16 +268,18 @@ func (s *BaseTests) TestListAndWatch(c *C) {
 	expectEvent(c, w, EventTypeCreate, key1, val1)
 	expectEvent(c, w, EventTypeListDone, "", []byte{})
 
-	err = CreateOnly(key2, val2, false)
+	success, err = CreateOnly(context.Background(), key2, val2, false)
 	c.Assert(err, IsNil)
+	c.Assert(success, Equals, true)
 	expectEvent(c, w, EventTypeCreate, key2, val2)
 
 	err = Delete(key1)
 	c.Assert(err, IsNil)
 	expectEvent(c, w, EventTypeDelete, key1, val1)
 
-	err = CreateOnly(key1, val1, false)
+	success, err = CreateOnly(context.Background(), key1, val1, false)
 	c.Assert(err, IsNil)
+	c.Assert(success, Equals, true)
 	expectEvent(c, w, EventTypeCreate, key1, val1)
 
 	err = Delete(key1)

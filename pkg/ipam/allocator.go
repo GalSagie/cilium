@@ -17,13 +17,22 @@ package ipam
 import (
 	"errors"
 	"fmt"
-	"math/big"
 	"net"
+	"strings"
 
-	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/metrics"
 
-	k8sAPI "k8s.io/kubernetes/pkg/api"
+	"github.com/sirupsen/logrus"
 )
+
+const (
+	metricAllocate = "allocate"
+	metricRelease  = "release"
+	familyIPv4     = "ipv4"
+	familyIPv6     = "ipv6"
+)
+
+type owner string
 
 // Error definitions
 var (
@@ -35,131 +44,205 @@ var (
 )
 
 // AllocateIP allocates a IP address.
-func AllocateIP(ip net.IP) error {
-	ipamConf.allocatorMutex.Lock()
-	defer ipamConf.allocatorMutex.Unlock()
+func (ipam *IPAM) AllocateIP(ip net.IP, owner string) (err error) {
+	ipam.allocatorMutex.Lock()
+	defer ipam.allocatorMutex.Unlock()
 
+	if ipam.blacklist.Contains(ip) {
+		err = fmt.Errorf("IP %s is blacklisted, owned by %s", ip.String(), owner)
+		return
+	}
+
+	family := familyIPv4
 	if ip.To4() != nil {
-		if ipamConf.IPv4Allocator == nil {
-			return ErrIPv4Disabled
+		if ipam.IPv4Allocator == nil {
+			err = ErrIPv4Disabled
+			return
 		}
 
-		if err := ipamConf.IPv4Allocator.Allocate(ip); err != nil {
-			return err
+		if _, err = ipam.IPv4Allocator.Allocate(ip, owner); err != nil {
+			return
 		}
 	} else {
-		if ipamConf.IPv6Allocator == nil {
-			return ErrIPv6Disabled
+		family = familyIPv6
+		if ipam.IPv6Allocator == nil {
+			err = ErrIPv6Disabled
+			return
 		}
 
-		if err := ipamConf.IPv6Allocator.Allocate(ip); err != nil {
-			return err
+		if _, err = ipam.IPv6Allocator.Allocate(ip, owner); err != nil {
+			return
 		}
 	}
 
-	return nil
+	log.WithFields(logrus.Fields{
+		"ip":    ip.String(),
+		"owner": owner,
+	}).Debugf("Allocated specific IP")
+
+	ipam.owner[ip.String()] = owner
+	metrics.IpamEvent.WithLabelValues(metricAllocate, family).Inc()
+	return
 }
 
 // AllocateIPString is identical to AllocateIP but takes a string
-func AllocateIPString(ipAddr string) error {
+func (ipam *IPAM) AllocateIPString(ipAddr, owner string) error {
 	ip := net.ParseIP(ipAddr)
 	if ip == nil {
 		return fmt.Errorf("Invalid IP address: %s", ipAddr)
 	}
 
-	return AllocateIP(ip)
+	return ipam.AllocateIP(ip, owner)
+}
+
+func (ipam *IPAM) allocateNextFamily(family Family, allocator Allocator, owner string) (result *AllocationResult, err error) {
+	if allocator == nil {
+		err = fmt.Errorf("%s allocator not available", family)
+		return
+	}
+
+	for {
+		result, err = allocator.AllocateNext(owner)
+		if err != nil {
+			return
+		}
+
+		if !ipam.blacklist.Contains(result.IP) {
+			log.WithFields(logrus.Fields{
+				"ip":    result.IP.String(),
+				"owner": owner,
+			}).Debugf("Allocated random IP")
+			ipam.owner[result.IP.String()] = owner
+			metrics.IpamEvent.WithLabelValues(metricAllocate, string(family)).Inc()
+			return
+		}
+
+		// The allocated IP is blacklisted, do not use it. The
+		// blacklisted IP is now allocated so it won't be allocated in
+		// the next iteration.
+		ipam.owner[result.IP.String()] = fmt.Sprintf("%s (blacklisted)", owner)
+	}
+}
+
+// AllocateNextFamily allocates the next IP of the requested address family
+func (ipam *IPAM) AllocateNextFamily(family Family, owner string) (result *AllocationResult, err error) {
+	ipam.allocatorMutex.Lock()
+	defer ipam.allocatorMutex.Unlock()
+
+	switch family {
+	case IPv6:
+		result, err = ipam.allocateNextFamily(family, ipam.IPv6Allocator, owner)
+	case IPv4:
+		result, err = ipam.allocateNextFamily(family, ipam.IPv4Allocator, owner)
+
+	default:
+		err = fmt.Errorf("unknown address \"%s\" family requested", family)
+	}
+	return
 }
 
 // AllocateNext allocates the next available IPv4 and IPv6 address out of the
 // configured address pool. If family is set to "ipv4" or "ipv6", then
 // allocation is limited to the specified address family. If the pool has been
 // drained of addresses, an error will be returned.
-func AllocateNext(family string) (net.IP, net.IP, error) {
-	var ipv4, ipv6 net.IP
-
-	if (family == "ipv6" || family == "") && ipamConf.IPv6Allocator != nil {
-		ipConf, err := ipamConf.IPv6Allocator.AllocateNext()
+func (ipam *IPAM) AllocateNext(family, owner string) (ipv4Result, ipv6Result *AllocationResult, err error) {
+	if (family == "ipv6" || family == "") && ipam.IPv6Allocator != nil {
+		ipv6Result, err = ipam.AllocateNextFamily(IPv6, owner)
 		if err != nil {
-			return nil, nil, err
+			return
 		}
 
-		ipv6 = ipConf
 	}
 
-	if (family == "ipv4" || family == "") && ipamConf.IPv4Allocator != nil {
-		ipConf, err := ipamConf.IPv4Allocator.AllocateNext()
+	if (family == "ipv4" || family == "") && ipam.IPv4Allocator != nil {
+		ipv4Result, err = ipam.AllocateNextFamily(IPv4, owner)
 		if err != nil {
-			return nil, nil, err
+			if ipv6Result != nil {
+				ipam.ReleaseIP(ipv6Result.IP)
+			}
+			return
 		}
-
-		ipv4 = ipConf
 	}
 
-	return ipv4, ipv6, nil
+	return
 }
 
 // ReleaseIP release a IP address.
-func ReleaseIP(ip net.IP) error {
-	ipamConf.allocatorMutex.Lock()
-	defer ipamConf.allocatorMutex.Unlock()
-
+func (ipam *IPAM) ReleaseIP(ip net.IP) error {
+	ipam.allocatorMutex.Lock()
+	defer ipam.allocatorMutex.Unlock()
+	family := familyIPv4
 	if ip.To4() != nil {
-		if ipamConf.IPv4Allocator == nil {
+		if ipam.IPv4Allocator == nil {
 			return ErrIPv4Disabled
 		}
 
-		if err := ipamConf.IPv4Allocator.Release(ip); err != nil {
+		if err := ipam.IPv4Allocator.Release(ip); err != nil {
 			return err
 		}
 	} else {
-		if ipamConf.IPv6Allocator == nil {
+		family = familyIPv6
+		if ipam.IPv6Allocator == nil {
 			return ErrIPv6Disabled
 		}
 
-		if err := ipamConf.IPv6Allocator.Release(ip); err != nil {
+		if err := ipam.IPv6Allocator.Release(ip); err != nil {
 			return err
 		}
 	}
 
+	owner := ipam.owner[ip.String()]
+	log.WithFields(logrus.Fields{
+		"ip":    ip.String(),
+		"owner": owner,
+	}).Debugf("Released IP")
+	delete(ipam.owner, ip.String())
+
+	metrics.IpamEvent.WithLabelValues(metricRelease, family).Inc()
 	return nil
 }
 
 // ReleaseIPString is identical to ReleaseIP but takes a string
-func ReleaseIPString(ipAddr string) error {
+func (ipam *IPAM) ReleaseIPString(ipAddr string) error {
 	ip := net.ParseIP(ipAddr)
 	if ip == nil {
 		return fmt.Errorf("Invalid IP address: %s", ipAddr)
 	}
 
-	return ReleaseIP(ip)
+	return ipam.ReleaseIP(ip)
 }
 
 // Dump dumps the list of allocated IP addresses
-func Dump() ([]string, []string) {
-	ipamConf.allocatorMutex.RLock()
-	defer ipamConf.allocatorMutex.RUnlock()
+func (ipam *IPAM) Dump() (allocv4 map[string]string, allocv6 map[string]string, status string) {
+	var st4, st6 string
 
-	allocv4 := []string{}
-	ralv4 := k8sAPI.RangeAllocation{}
-	ipamConf.IPv4Allocator.Snapshot(&ralv4)
-	origIP := big.NewInt(0).SetBytes(node.GetIPv4AllocRange().IP)
-	v4Bits := big.NewInt(0).SetBytes(ralv4.Data)
-	for i := 0; i < v4Bits.BitLen(); i++ {
-		if v4Bits.Bit(i) != 0 {
-			allocv4 = append(allocv4, net.IP(big.NewInt(0).Add(origIP, big.NewInt(int64(uint(i+1)))).Bytes()).String())
+	ipam.allocatorMutex.RLock()
+	defer ipam.allocatorMutex.RUnlock()
+
+	if ipam.IPv4Allocator != nil {
+		allocv4, st4 = ipam.IPv4Allocator.Dump()
+		st4 = "IPv4: " + st4
+		for ip := range allocv4 {
+			owner, _ := ipam.owner[ip]
+			// If owner is not available, report IP but leave owner empty
+			allocv4[ip] = owner
 		}
 	}
 
-	allocv6 := []string{}
-	ralv6 := k8sAPI.RangeAllocation{}
-	ipamConf.IPv6Allocator.Snapshot(&ralv6)
-	origIP = big.NewInt(0).SetBytes(node.GetIPv6AllocRange().IP)
-	v6Bits := big.NewInt(0).SetBytes(ralv6.Data)
-	for i := 0; i < v6Bits.BitLen(); i++ {
-		if v6Bits.Bit(i) != 0 {
-			allocv6 = append(allocv6, net.IP(big.NewInt(0).Add(origIP, big.NewInt(int64(uint(i+1)))).Bytes()).String())
+	if ipam.IPv6Allocator != nil {
+		allocv6, st6 = ipam.IPv6Allocator.Dump()
+		st6 = "IPv6: " + st6
+		for ip := range allocv6 {
+			owner, _ := ipam.owner[ip]
+			// If owner is not available, report IP but leave owner empty
+			allocv6[ip] = owner
 		}
 	}
 
-	return allocv4, allocv6
+	status = strings.Join([]string{st4, st6}, ", ")
+	if status == "" {
+		status = "Not running"
+	}
+
+	return
 }

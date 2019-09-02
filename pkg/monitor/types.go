@@ -14,20 +14,24 @@
 
 package monitor
 
-// Must be synchronized with <bpf/lib/common.h>
-const (
-	// 0-128 are reserved for BPF datapath events
-	MessageTypeUnspec = iota
-	MessageTypeDrop
-	MessageTypeDebug
-	MessageTypeCapture
-	MessageTypeTrace
+import (
+	"sort"
 
-	// 129-255 are reserved for agent level events
+	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 
-	// MessageTypeAccessLog contains a pkg/proxy/accesslog.LogRecord
-	MessageTypeAccessLog = 129
-
-	// MessageTypeAgent is an agent notification carrying a AgentNotify
-	MessageTypeAgent = 130
+	"github.com/spf13/pflag"
 )
+
+var _ pflag.Value = &monitorAPI.MessageTypeFilter{}
+
+// GetAllTypes returns a slice of all known message types, sorted
+func GetAllTypes() []string {
+	types := make([]string, len(monitorAPI.MessageTypeNames))
+	i := 0
+	for k := range monitorAPI.MessageTypeNames {
+		types[i] = k
+		i++
+	}
+	sort.Strings(types)
+	return types
+}

@@ -1,19 +1,27 @@
-# Container for making it easier to build the documentation via Docker.
-FROM ubuntu:16.04
+FROM docker.io/library/python:3.6.7-alpine3.8
+
+LABEL maintainer="maintainer@cilium.io"
+
 ENV DOCS_DIR=/srv/Documentation
 ENV API_DIR=/srv/api
 
-ADD Documentation/requirements.txt $DOCS_DIR/requirements.txt
+ADD ./requirements.txt $DOCS_DIR/requirements.txt
 
-RUN apt-get update && \
-      apt-get install -y git make python-sphinx python-pip \
-      # PDF dependencies use a lot of space, left here for others.
-      # latexmk texlive-latex-extra
-      && apt-get clean && \
-      pip install --upgrade pip && \
-      pip install -r $DOCS_DIR/requirements.txt && \
-      rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+ENV PACKAGES="\
+    bash \
+    ca-certificates \
+    make \
+    git \
+    python \
+    py-pip \
+    sphinx-python \
+    enchant \
+    aspell-en \
+"
+RUN apk add --no-cache --virtual --update $PACKAGES && \
+    pip install --upgrade pip && \
+    pip install -r $DOCS_DIR/requirements.txt
 
 WORKDIR $DOCS_DIR
-ADD api $API_DIR
-ADD Documentation $DOCS_DIR
+ADD _api $API_DIR
+ADD . $DOCS_DIR

@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,32 +16,28 @@ package RuntimeTest
 
 import (
 	"context"
-	"sync"
 
+	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
+	"github.com/cilium/cilium/test/helpers/constants"
 
-	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
 )
 
-var _ = Describe("RuntimeValidatedKVStoreTest", func() {
+var _ = Describe("RuntimeKVStoreTest", func() {
 
-	var once sync.Once
-	var logger *logrus.Entry
 	var vm *helpers.SSHMeta
 
-	initialize := func() {
-		logger = log.WithFields(logrus.Fields{"testName": "RuntimeKVStoreTest"})
-		logger.Info("Starting")
-		vm = helpers.CreateNewRuntimeHelper(helpers.Runtime, logger)
-		logger.Info("done creating Cilium and Docker helpers")
-	}
+	BeforeAll(func() {
+		vm = helpers.InitRuntimeHelper(helpers.Runtime, logger)
+		ExpectCiliumReady(vm)
+	})
+
 	containers := func(option string) {
 		switch option {
 		case helpers.Create:
 			vm.NetworkCreate(helpers.CiliumDockerNetwork, "")
-			vm.ContainerCreate(helpers.Client, helpers.NetperfImage, helpers.CiliumDockerNetwork, "-l id.client")
+			vm.ContainerCreate(helpers.Client, constants.NetperfImage, helpers.CiliumDockerNetwork, "-l id.client")
 		case helpers.Delete:
 			vm.ContainerRm(helpers.Client)
 
@@ -49,47 +45,60 @@ var _ = Describe("RuntimeValidatedKVStoreTest", func() {
 	}
 
 	BeforeEach(func() {
-		once.Do(initialize)
-		vm.Exec("sudo systemctl stop cilium")
+		res := vm.ExecWithSudo("systemctl stop cilium")
+		res.ExpectSuccess("Failed trying to stop cilium via systemctl")
+		ExpectCiliumNotRunning(vm)
 	}, 150)
 
 	AfterEach(func() {
-		if CurrentGinkgoTestDescription().Failed {
-			vm.ReportFailed(
-				"sudo docker ps -a",
-				"sudo cilium endpoint list")
-		}
 		containers(helpers.Delete)
-		vm.Exec("sudo systemctl start cilium")
+		err := vm.RestartCilium()
+		Expect(err).Should(BeNil(), "restarting Cilium failed")
+	})
+
+	JustAfterEach(func() {
+		vm.ValidateNoErrorsInLogs(CurrentGinkgoTestDescription().Duration)
+	})
+
+	AfterFailed(func() {
+		vm.ReportFailed("cilium status")
+	})
+
+	AfterAll(func() {
+		vm.CloseSSHClient()
 	})
 
 	It("Consul KVStore", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		vm.ExecContext(
+		By("Starting Cilium with consul as kvstore")
+		vm.ExecInBackground(
 			ctx,
 			"sudo cilium-agent --kvstore consul --kvstore-opt consul.address=127.0.0.1:8500 --debug")
-		err := vm.WaitUntilReady(150)
+		err := vm.WaitUntilReady(helpers.CiliumStartTimeout)
 		Expect(err).Should(BeNil())
 
+		By("Restarting cilium-docker service")
 		vm.Exec("sudo systemctl restart cilium-docker")
 		helpers.Sleep(2)
 		containers(helpers.Create)
 		vm.WaitEndpointsReady()
 		eps, err := vm.GetEndpointsNames()
-		Expect(err).Should(BeNil())
-		Expect(len(eps)).To(Equal(1))
+		Expect(err).Should(BeNil(), "Error getting names of endpoints from cilium")
+		Expect(len(eps)).To(Equal(1), "Number of endpoints in Cilium differs from what is expected")
 	})
 
 	It("Etcd KVStore", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		vm.ExecContext(
+		By("Starting Cilium with etcd as kvstore")
+		vm.ExecInBackground(
 			ctx,
-			"sudo cilium-agent --kvstore etcd --kvstore-opt etcd.address=127.0.0.1:4001")
-		err := vm.WaitUntilReady(150)
-		Expect(err).Should(BeNil())
+			"sudo cilium-agent --kvstore etcd --kvstore-opt etcd.address=127.0.0.1:4001 2>&1 | logger -t cilium")
+		err := vm.WaitUntilReady(helpers.CiliumStartTimeout)
+		Expect(err).Should(BeNil(), "Timed out waiting for VM to be ready after restarting Cilium")
 
+		By("Restarting cilium-docker service")
 		vm.Exec("sudo systemctl restart cilium-docker")
 		helpers.Sleep(2)
 		containers(helpers.Create)
@@ -97,7 +106,7 @@ var _ = Describe("RuntimeValidatedKVStoreTest", func() {
 		vm.WaitEndpointsReady()
 
 		eps, err := vm.GetEndpointsNames()
-		Expect(err).Should(BeNil())
-		Expect(len(eps)).To(Equal(1))
+		Expect(err).Should(BeNil(), "Error getting names of endpoints from cilium")
+		Expect(len(eps)).To(Equal(1), "Number of endpoints in Cilium differs from what is expected")
 	})
 })

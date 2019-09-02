@@ -1,18 +1,24 @@
-******************************
-Getting Started Securing Kafka 
-******************************
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
+.. _gs_kafka:
+
+************************
+Securing a Kafka cluster
+************************
 
 This document serves as an introduction to using Cilium to enforce Kafka-aware
 security policies.  It is a detailed walk-through of getting a single-node
 Cilium environment running on your machine. It is designed to take 15-30
 minutes.
 
-.. include:: gsg_intro.rst
-.. include:: minikube_intro.rst
-.. include:: cilium_install.rst
+.. include:: gsg_requirements.rst
 
-Step 2: Deploy the Demo Application
-===================================
+Deploy the Demo Application
+===========================
 
 Now that we have Cilium deployed and ``kube-dns`` operating correctly we can
 deploy our demo Kafka application.  Since our first demo of Cilium + HTTP-aware security
@@ -59,6 +65,7 @@ above, as well as a Kubernetes Service for both Kafka and Zookeeper.
 
     $ kubectl create -f \ |SCM_WEB|\/examples/kubernetes-kafka/kafka-sw-app.yaml
     deployment "kafka-broker" created
+    deployment "zookeeper" created
     service "zook" created
     service "kafka-service" created
     deployment "empire-hq" created
@@ -66,29 +73,29 @@ above, as well as a Kubernetes Service for both Kafka and Zookeeper.
     deployment "empire-outpost-9999" created
     deployment "empire-backup" created
 
-Kubernetes will deploy the pods and service  in the background.  Running
-``kubectl get svc,pods`` will inform you about the progress of the operation.
+Kubernetes will deploy the pods and service  in the background.
+Running ``kubectl get svc,pods`` will inform you about the progress of the operation.
 Each pod will go through several states until it reaches ``Running`` at which
 point the setup is ready.
 
 ::
 
-    $ kubectl get pods,svc
-    NAME                                     READY     STATUS    RESTARTS   AGE
-    po/empire-backup-955026812-cnv9j         1/1       Running   0          1m
-    po/empire-hq-1887702787-48sd1            1/1       Running   0          1m
-    po/empire-outpost-8888-422023320-0568m   1/1       Running   0          1m
-    po/empire-outpost-9999-422023320-wlllp   1/1       Running   0          1m
-    po/kafka-broker-3436435889-tsg2s         2/2       Running   0          1m
+    $ kubectl get svc,pods
+    NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+    kafka-service   ClusterIP   None            <none>        9092/TCP   2m
+    kubernetes      ClusterIP   10.96.0.1       <none>        443/TCP    10m
+    zook            ClusterIP   10.97.250.131   <none>        2181/TCP   2m
 
-    NAME                CLUSTER-IP   EXTERNAL-IP   PORT(S)    AGE
-    svc/kafka-service   10.0.0.20    <none>        9092/TCP   1m
-    svc/kubernetes      10.0.0.1     <none>        443/TCP    6m
-    svc/zook            10.0.0.200   <none>        2181/TCP   1m
+    NAME                                   READY     STATUS    RESTARTS   AGE
+    empire-backup-6f4567d5fd-gcrvg         1/1       Running   0          2m
+    empire-hq-59475b4b64-mrdww             1/1       Running   0          2m
+    empire-outpost-8888-78dffd49fb-tnnhf   1/1       Running   0          2m
+    empire-outpost-9999-7dd9fc5f5b-xp6jw   1/1       Running   0          2m
+    kafka-broker-b874c78fd-jdwqf           1/1       Running   0          2m
+    zookeeper-85f64b8cd4-nprck             1/1       Running   0          2m
 
-
-Step 3: Setup Client Terminals
-==============================
+Setup Client Terminals
+======================
 
 First we will open a set of windows to represent the different Kafka clients discussed above.
 For consistency, we recommend opening them in the pattern shown in the image below, but this is optional.
@@ -118,8 +125,8 @@ outpost-9999 terminal:
    $ OUTPOST_9999_POD=$(kubectl get pods -l outpostid=9999 -o jsonpath='{.items[0].metadata.name}') && kubectl exec -it $OUTPOST_9999_POD -- sh -c "PS1=\"outpost-9999 $\" /bin/bash"
 
 
-Step 4: Test Basic Kafka Produce & Consume
-==========================================
+Test Basic Kafka Produce & Consume
+==================================
 
 First, let's start the consumer clients listening to their respective Kafka topics.  All of the consumer
 commands below will hang intentionally, waiting to print data they consume from the Kafka topic:
@@ -161,8 +168,8 @@ This message shows up in the *empire-backup* window, but not for the outposts.
 
 Congratulations, Kafka is working as expected :)
 
-Step 5:  The Danger of a Compromised Kafka Client
-=================================================
+The Danger of a Compromised Kafka Client
+========================================
 
 But what if a rebel spy gains access to any of the remote outposts that act as Kafka clients?
 Since every client has access to the Kafka broker on port 9092, it can do some bad stuff.
@@ -191,8 +198,8 @@ In the outpost-9999 container, run:
 We see that any outpost can actually access the secret deathstar plans.  Now we know how the rebels got
 access to them!
 
-Step 6: Securing Access to Kafka with Cilium
-============================================
+Securing Access to Kafka with Cilium
+====================================
 
 Obviously, it would be much more secure to limit each pod's access to the Kafka broker to be
 least privilege (i.e., only what is needed for the app to operate correctly and nothing more).
@@ -220,16 +227,12 @@ The above rule applies to inbound (i.e., "ingress") connections to kafka-broker 
 indicated by "app: kafka"
 in the "endpointSelector" section).  The rule will apply to connections from pods with label
 "app: empire-outpost" as indicated by the "fromEndpoints" section.   The rule explicitly matches
-Kafka connections destined to TCP 9092, and white-lists a list of protocol requests according to various
-fields found in Kafka protocol messages.  Specifically, each request contains an "apiKey" field that
-indicates the type of request, and the policy white-lists several apiKey's here, the most important being the
-apiKey "fetch",
-which allows the client to consume from a particular topic.   Notice that requests with "apiKey: fetch"
-are further limited by a "topic" field, in this case *empire-announce*.
+Kafka connections destined to TCP 9092, and allows consume/produce actions on various topics of interest.
+For example we are allowing *consume* from topic *empire-announce* in this case.
 
-The full policy adds two additional rules that permit the legitimate produce request
+The full policy adds two additional rules that permit the legitimate "produce"
 (topic *empire-announce* and topic *deathstar-plans*) from *empire-hq* and the
-legitimate fetch requests (topic = "deathstar-plans") from *empire-backup*.  The full policy
+legitimate consume  (topic = "deathstar-plans") from *empire-backup*.  The full policy
 can be reviewed by opening the URL in the command below in a browser.
 
 Apply this Kafka-aware network security policy using ``kubectl`` in the main window:
@@ -244,32 +247,29 @@ Type control-c and then run:
 ::
 
   $ echo "Vader Trips on His Own Cape" | ./kafka-produce.sh --topic empire-announce
-  [2017-10-31 07:08:34,088] ERROR Error when sending message to topic empire-announce with key: null, value: 33  bytes with error: (org.apache.kafka.clients.producer.internals.ErrorLoggingCallback)
+  >>[2018-04-10 23:50:34,638] ERROR Error when sending message to topic empire-announce with key: null, value: 27 bytes with error: (org.apache.kafka.clients.producer.internals.ErrorLoggingCallback)
   org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [empire-announce]
 
-This is because the policy does not allow messages with apiKey = "produce" for topic "empire-announce" from
+This is because the policy does not allow messages with role = "produce" for topic "empire-announce" from
 containers with label app = empire-outpost.  Its worth noting that we don't simply drop the message (which
 could easily be confused with a network error), but rather we respond with the Kafka access denied error
 (similar to how HTTP would return an error code of 403 unauthorized).
 
 Likewise, if the outpost container ever tries to consume from topic *deathstar-plans*, it is denied, as
-apiKey = fetch is only allowed for topic *empire-announce*.
+role = consume is only allowed for topic *empire-announce*.
 
 To test, from the outpost-9999 terminal, run:
 
 ::
 
-  $ ./kafka-consume.sh --topic deathstar-plans
-  [2017-10-31 07:09:36,679] WARN Not authorized to read from topic deathstar-plans. (org.apache.kafka.clients.consumer.internals.Fetcher)
-  [2017-10-31 07:09:36,683] ERROR Error processing message, terminating consumer process:  (kafka.tools.ConsoleConsumer$)
-  org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [deathstar-plans]
-  Processed a total of 0 messages
+  $./kafka-consume.sh --topic deathstar-plans
+  [2018-04-10 23:51:12,956] WARN Error while fetching metadata with correlation id 2 : {deathstar-plans=TOPIC_AUTHORIZATION_FAILED} (org.apache.kafka.clients.NetworkClient)
 
-This is blocked as well, thanks to the Cilium network policy.  Imagine how different things would have been if the empire had been using
+This is blocked as well, thanks to the Cilium network policy. Imagine how different things would have been if the empire had been using
 Cilium from the beginning!
 
-Step 6: Clean Up
-================
+Clean Up
+========
 
 You have now installed Cilium, deployed a demo app, and tested both
 L7 Kafka-aware network security policies.  To clean up, run:

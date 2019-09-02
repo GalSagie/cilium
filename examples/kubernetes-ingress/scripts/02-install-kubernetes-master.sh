@@ -10,6 +10,10 @@ dir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
 source "${dir}/helpers.bash"
 
+cache_dir="${dir}/../../../hack/cache"
+
+k8s_cache_dir="${cache_dir}/k8s/${k8s_version}"
+
 log "Installing kubernetes master components..."
 
 certs_dir="${dir}/certs"
@@ -35,27 +39,17 @@ cp "${certs_dir}/ca-k8s.pem" \
    "${certs_dir}/k8s-controller-manager-sa-key.pem" \
    /var/lib/kubernetes
 
+# Since k8s 1.11.0-beta.2, kube-apiserver stop receiving the flag `--tls-ca-file`
+# Now we need to append the CA after the certificate
+cat "${certs_dir}/ca-k8s.pem" >> "/var/lib/kubernetes/k8s-api-server.pem"
+
 if [ -n "${INSTALL}" ]; then
-    log "Downloading kube-apiserver..."
+    for component in kubectl kube-apiserver kube-controller-manager kube-scheduler; do
+        download_to "${k8s_cache_dir}" "${component}" \
+            "https://dl.k8s.io/release/${k8s_version}/bin/linux/amd64/${component}"
 
-    wget -nv https://dl.k8s.io/release/${k8s_version}/bin/linux/amd64/kube-apiserver
-
-    log "Downloading kube-apiserver... Done!"
-    log "Downloading kube-controller-manager..."
-
-    wget -nv https://dl.k8s.io/release/${k8s_version}/bin/linux/amd64/kube-controller-manager
-
-    log "Downloading kube-controller-manager... Done!"
-    log "Downloading kube-scheduler..."
-
-    wget -nv https://dl.k8s.io/release/${k8s_version}/bin/linux/amd64/kube-scheduler
-
-    log "Downloading kube-scheduler... Done!"
-    log "Downloading kubectl..."
-
-    wget -nv https://dl.k8s.io/release/${k8s_version}/bin/linux/amd64/kubectl
-
-    log "Downloading kubectl... Done!"
+        cp "${k8s_cache_dir}/${component}" .
+    done
 
     chmod +x kube-apiserver kube-controller-manager kube-scheduler kubectl
 
@@ -69,7 +63,7 @@ Documentation=https://kubernetes.io/docs/home
 
 [Service]
 ExecStart=/usr/bin/kube-apiserver \\
-  --admission-control=NamespaceLifecycle,LimitRanger,ServiceAccount,NodeRestriction,PersistentVolumeLabel,DefaultStorageClass,ResourceQuota,DefaultTolerationSeconds \\
+  --enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolumeClaimResize,DefaultStorageClass,DefaultTolerationSeconds,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota,Priority \\
   --advertise-address=${controllers_ips[1]} \\
   --allow-privileged=true \\
   --authorization-mode=Node,RBAC \\
@@ -89,7 +83,6 @@ ExecStart=/usr/bin/kube-apiserver \\
   --service-account-key-file='/var/lib/kubernetes/k8s-controller-manager-sa.pem' \\
   --service-cluster-ip-range=${k8s_service_cluster_ip_range} \\
   --service-node-port-range=30000-32767 \\
-  --tls-ca-file='/var/lib/kubernetes/ca-k8s.pem' \\
   --tls-cert-file='/var/lib/kubernetes/k8s-api-server.pem' \\
   --tls-private-key-file='/var/lib/kubernetes/k8s-api-server-key.pem' \\
   --v=2

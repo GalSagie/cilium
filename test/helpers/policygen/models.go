@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,15 +22,23 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	cnpv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/test/helpers"
+	"github.com/cilium/cilium/test/helpers/constants"
+
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
 	log "github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+var timeout = 10 * time.Minute
 
 // ConnTestSpec Connectivity Test Specification. This structs contains the
 // mapping of all protocols tested and the expected result based on the context
@@ -58,7 +66,7 @@ func (conn *ConnTestSpec) GetField(field string) ResultType {
 	return ResultType{}
 }
 
-// PolicyTestKind is utilized to decribe a new TestCase
+// PolicyTestKind is utilized to describe a new TestCase
 // It needs a described name, the kind of the test (Egrees or Ingress) and the
 // expected result of `ConnTestSpec`
 // Template field is used to render the cilium network policy.
@@ -67,6 +75,7 @@ type PolicyTestKind struct {
 	kind     string //Egress/ingress
 	tests    ConnTestSpec
 	template map[string]string
+	exclude  []string
 }
 
 // SetTemplate renders the template field from the PolicyTest struct using go
@@ -115,7 +124,7 @@ type ResultType struct {
 
 // String returns the ResultType in humman readable format
 func (res ResultType) String() string {
-	return fmt.Sprintf("kind: %s sucess: %t", res.kind, res.success)
+	return fmt.Sprintf("kind: %s success: %t", res.kind, res.success)
 }
 
 // PolicyTestSuite groups together L3, L4, and L7 policy-related tests.
@@ -224,7 +233,10 @@ func (t *Target) CreateApplyManifest(spec *TestSpec) error {
 		"apiVersion": "v1",
 		"kind": "Service",
 		"metadata": {
-			"name": "{{ .targetName }}"
+			"name": "{{ .targetName }}",
+			"labels": {
+				"test": "policygen"
+			}
 		},
 		"spec": {
 			"ports": [
@@ -249,7 +261,10 @@ func (t *Target) CreateApplyManifest(spec *TestSpec) error {
 		  "apiVersion": "v1",
 		  "kind": "Service",
 		  "metadata": {
-			"name": "{{ .targetName }}"
+			"name": "{{ .targetName }}",
+			"labels": {
+				"test": "policygen"
+			}
 		  },
 		  "spec": {
 			"type": "NodePort",
@@ -326,6 +341,7 @@ func (t TestSpec) String() string {
 // with the expected results within the test specification
 func (t *TestSpec) RunTest(kub *helpers.Kubectl) {
 	defer func() { go t.Destroy(destroyDelay) }()
+
 	t.Kub = kub
 	err := t.CreateManifests()
 	gomega.Expect(err).To(gomega.BeNil(), "cannot create pods manifest for %s", t.Prefix)
@@ -337,11 +353,47 @@ func (t *TestSpec) RunTest(kub *helpers.Kubectl) {
 	err = t.Destination.CreateApplyManifest(t)
 	gomega.Expect(err).To(gomega.BeNil(), "cannot apply destination for %s", t.Prefix)
 
+	if t.IsPolicyInvalid() {
+		// Some policies cannot be applied correctly because of different
+		// rules. This code makes sure that the status of the policy has a error
+		// in the status.
+		cnp, err := t.InvalidNetworkPolicyApply()
+		kub.Exec(fmt.Sprintf("%s delete cnp %s", helpers.KubectlCmd, t.Prefix))
+		gomega.Expect(err).To(gomega.BeNil(), "Cannot apply network policy")
+		gomega.Expect(cnp).NotTo(gomega.BeNil(), "CNP is not a valid struct")
+		gomega.Expect(cnp.Status.Nodes).NotTo(gomega.BeEmpty(), "CNP Status is empty")
+
+		for node, status := range cnp.Status.Nodes {
+			gomega.Expect(status.Error).NotTo(gomega.BeEmpty(),
+				"Node %q applied invalid policy and do not raise an error", node)
+		}
+		return
+	}
+
 	err = t.NetworkPolicyApply()
 	gomega.Expect(err).To(gomega.BeNil(), "cannot apply network policy for %s", t.Prefix)
 
+	err = kub.CiliumEndpointWaitReady()
+	gomega.Expect(err).To(gomega.BeNil(), "Endpoints are not ready after timeout")
+
 	err = t.ExecTest()
 	gomega.Expect(err).To(gomega.BeNil(), "cannot execute test for %s", t.Prefix)
+}
+
+// IsPolicyInvalid validates that the policy combination does not match with
+// testSpec.exclude information. That means that if a policy cannot be
+// installed we know that the combination is invalid.
+func (t *TestSpec) IsPolicyInvalid() bool {
+	var exclude []string
+	exclude = append(t.l3.exclude, t.l4.exclude...)
+	exclude = append(exclude, t.l7.exclude...)
+
+	for _, value := range exclude {
+		if strings.Contains(t.String(), value) {
+			return true
+		}
+	}
+	return false
 }
 
 // Destroy deletes the pods, CiliumNetworkPolicies and Destinations created by
@@ -393,10 +445,13 @@ metadata:
   labels:
     id: "%[2]s"
     zgroup: "%[1]s"
+    test: "policygen"
 spec:
+  terminationGracePeriodSeconds: 0
   containers:
   - name: app-frontend
-    image: byrnedo/alpine-curl
+    image: %[4]s
+    imagePullPolicy: IfNotPresent
     command: [ "sleep" ]
     args:
       - "1000h"
@@ -408,16 +463,19 @@ metadata:
   labels:
     id: "%[3]s"
     zgroup: "%[1]s"
+    test: "policygen"
 spec:
+  terminationGracePeriodSeconds: 0
   containers:
   - name: web
-    image: cilium/demo-httpd
+    image: %[5]s
+    imagePullPolicy: IfNotPresent
     ports:
       - containerPort: 80`
 
 	err := helpers.RenderTemplateToFile(
 		t.GetManifestName(),
-		fmt.Sprintf(manifest, t.Prefix, t.SrcPod, t.DestPod),
+		fmt.Sprintf(manifest, t.Prefix, t.SrcPod, t.DestPod, constants.AlpineCurlImage, constants.HttpdImage),
 		os.ModePerm)
 	if err != nil {
 		return err
@@ -436,8 +494,11 @@ func (t *TestSpec) ApplyManifest() (string, error) {
 	if !res.WasSuccessful() {
 		return "", fmt.Errorf("%s", res.CombineOutput())
 	}
-	status, err := t.Kub.WaitforPods(helpers.DefaultNamespace, fmt.Sprintf("-l zgroup=%s", t.Prefix), 300)
-	if err != nil || !status {
+	err = t.Kub.WaitforPods(
+		helpers.DefaultNamespace,
+		fmt.Sprintf("-l zgroup=%s", t.Prefix),
+		timeout)
+	if err != nil {
 		return "", err
 	}
 	return t.GetManifestName(), nil
@@ -472,16 +533,7 @@ func (t *TestSpec) CreateCiliumNetworkPolicy() (string, error) {
 
 	type rule map[string]interface{}
 
-	type endpointSelector struct {
-		Matchlabels map[string]string `json:"matchlabels"`
-	}
-
-	type Spec struct {
-		EndpointSelector endpointSelector
-		Ingress          []rule
-		Egress           []rule
-	}
-	specs := []Spec{}
+	specs := []api.Rule{}
 	var err error
 
 	ingressMap := map[string]interface{}{}
@@ -495,7 +547,9 @@ func (t *TestSpec) CreateCiliumNetworkPolicy() (string, error) {
 	  "kind": "CiliumNetworkPolicy",
 	  "metadata": {
 		"name": "%[1]s",
-		"test": "%[3]s"
+		"labels": {
+			"test": "policygen"
+		}
 	  },
 	  "specs": %[2]s}`)
 
@@ -542,22 +596,45 @@ func (t *TestSpec) CreateCiliumNetworkPolicy() (string, error) {
 	}
 
 	if len(ingressMap) > 0 {
-		specs = append(specs, Spec{
-			EndpointSelector: endpointSelector{
-				Matchlabels: map[string]string{
-					"id": t.DestPod},
+		var ingressVal api.IngressRule
+		jsonOut, err := json.Marshal(ingressMap)
+		if err != nil {
+			return "", err
+		}
+		err = json.Unmarshal(jsonOut, &ingressVal)
+		if err != nil {
+			return "", err
+		}
+		specs = append(specs, api.Rule{
+			EndpointSelector: api.EndpointSelector{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"id": t.DestPod,
+				}},
 			},
-			Ingress: []rule{ingressMap},
+			Ingress: []api.IngressRule{ingressVal},
+			Egress:  []api.EgressRule{},
 		})
 	}
 
 	if len(egressMap) > 0 {
-		specs = append(specs, Spec{
-			EndpointSelector: endpointSelector{
-				Matchlabels: map[string]string{
-					"id": t.SrcPod},
+		var egressVal api.EgressRule
+		jsonOut, err := json.Marshal(egressMap)
+		if err != nil {
+			return "", err
+		}
+		err = json.Unmarshal(jsonOut, &egressVal)
+		if err != nil {
+			return "", err
+		}
+
+		specs = append(specs, api.Rule{
+			EndpointSelector: api.EndpointSelector{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"id": t.SrcPod,
+				}},
 			},
-			Egress: []rule{egressMap},
+			Ingress: []api.IngressRule{},
+			Egress:  []api.EgressRule{egressVal},
 		})
 	}
 
@@ -569,7 +646,7 @@ func (t *TestSpec) CreateCiliumNetworkPolicy() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(string(metadata), t.Prefix, jsonOutput, t), nil
+	return fmt.Sprintf(string(metadata), t.Prefix, jsonOutput), nil
 }
 
 // NetworkPolicyName returns the name of the NetworkPolicy
@@ -598,7 +675,7 @@ func (t *TestSpec) NetworkPolicyApply() error {
 	}
 
 	_, err = t.Kub.CiliumPolicyAction(
-		helpers.KubeSystemNamespace,
+		helpers.DefaultNamespace,
 		fmt.Sprintf("%s/%s", helpers.BasePath, t.NetworkPolicyName()),
 		helpers.KubectlApply,
 		helpers.HelperTimeout)
@@ -607,6 +684,47 @@ func (t *TestSpec) NetworkPolicyApply() error {
 		return fmt.Errorf("Network policy cannot be imported prefix=%s: %s", t.Prefix, err)
 	}
 	return nil
+}
+
+// InvalidNetworkPolicyApply it writes the policy and applies to Kubernetes,
+// but instead of apply the policy, this return the CNP status for the TestSpec
+// policy. This function is only used when a invalid combination of policies
+// are created, where we need to test that the error is present.
+func (t *TestSpec) InvalidNetworkPolicyApply() (*cnpv2.CiliumNetworkPolicy, error) {
+	policy, err := t.CreateCiliumNetworkPolicy()
+	if err != nil {
+		return nil, fmt.Errorf("Network policy cannot be created prefix=%s: %s", t.Prefix, err)
+	}
+
+	err = ioutil.WriteFile(t.NetworkPolicyName(), []byte(policy), os.ModePerm)
+	if err != nil {
+		return nil, fmt.Errorf("Network policy cannot be written prefix=%s: %s", t.Prefix, err)
+	}
+
+	res := t.Kub.Apply(filepath.Join(helpers.BasePath, t.NetworkPolicyName()))
+	if !res.WasSuccessful() {
+		return nil, fmt.Errorf("%s", res.CombineOutput())
+	}
+	body := func() bool {
+		cnp := t.Kub.GetCNP(helpers.DefaultNamespace, t.Prefix)
+		if cnp != nil && len(cnp.Status.Nodes) > 0 {
+			return true
+		}
+		return false
+	}
+	err = helpers.WithTimeout(
+		body,
+		fmt.Sprintf("CNP %q is not ready after timeout", t.Prefix),
+		&helpers.TimeoutConfig{Timeout: 100 * time.Second})
+	if err != nil {
+		return nil, err
+	}
+	cnp := t.Kub.GetCNP(helpers.DefaultNamespace, t.Prefix)
+	if cnp == nil {
+		return nil, fmt.Errorf("Cannot get cnp '%s'", t.Prefix)
+	}
+
+	return cnp, nil
 }
 
 type connTestResultType struct {
@@ -694,7 +812,11 @@ func (tg TestSpecsGroup) CreateAndApplyManifests(kub *helpers.Kubectl) {
 	for _, test := range tg {
 		test.CreateManifests()
 		manifests = append(manifests, test.GetManifestsPath())
+		test.Kub = kub
+		err := test.Destination.CreateApplyManifest(test)
+		gomega.ExpectWithOffset(1, err).To(gomega.BeNil(), "cannot apply destination for %s", test.Prefix)
 	}
+
 	res := kub.Exec(fmt.Sprintf("cat %s > %s", strings.Join(manifests, " "), completeManifest))
 	res.ExpectSuccess()
 
@@ -717,10 +839,7 @@ func (tg TestSpecsGroup) CreateAndApplyCNP(kub *helpers.Kubectl) {
 // the TestSpecsGroup
 func (tg TestSpecsGroup) ConnectivityTest() {
 	for _, test := range tg {
-		err := test.Destination.CreateApplyManifest(test)
-		gomega.ExpectWithOffset(1, err).To(gomega.BeNil(), "cannot apply destination for %s", test.Prefix)
-
-		err = test.ExecTest()
+		err := test.ExecTest()
 		gomega.ExpectWithOffset(1, err).To(gomega.BeNil(), "cannot execute test for %s", test.Prefix)
 	}
 }

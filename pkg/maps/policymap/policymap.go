@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,49 +17,80 @@ package policymap
 import (
 	"bytes"
 	"fmt"
+	"syscall"
 	"unsafe"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
-	"github.com/cilium/cilium/pkg/comparator"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/policy/trafficdirection"
+	"github.com/cilium/cilium/pkg/u8proto"
 )
 
 const (
-	MapName = "cilium_policy_"
+	// CallMapName is the name of the map to do tail calls into policy
+	// enforcement programs
+	CallMapName = "cilium_policy"
+
+	// MapName is the prefix for endpoint-specific policy maps which map
+	// identity+ports+direction to whether the policy allows communication
+	// with that identity on that port for that direction.
+	MapName = CallMapName + "_"
+
+	// ProgArrayMaxEntries is the upper limit of entries in the program
+	// array for the tail calls to jump into the endpoint specific policy
+	// programs. This number *MUST* be identical to the maximum endponit ID.
+	ProgArrayMaxEntries = ^uint16(0)
+
+	// AllPorts is used to ignore the L4 ports in PolicyMap lookups; all ports
+	// are allowed. In the datapath, this is represented with the value 0 in the
+	// port field of map elements.
+	AllPorts = uint16(0)
 )
 
 var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "policy-map")
+	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "map-policy")
+
+	// MaxEntries is the upper limit of entries in the per endpoint policy
+	// table
+	MaxEntries = 16384
 )
 
 type PolicyMap struct {
-	path string
-	Fd   int
+	*bpf.Map
 }
-
-const (
-	MAX_KEYS = 1024
-)
 
 func (pe *PolicyEntry) String() string {
-	return string(pe.Action)
+	return fmt.Sprintf("%d %d %d", pe.ProxyPort, pe.Packets, pe.Bytes)
 }
 
-type policyKey struct {
-	Identity uint32
-	DestPort uint16 // In network byte-order
-	Nexthdr  uint8
-	Pad      uint8
+// PolicyKey represents a key in the BPF policy map for an endpoint. It must
+// match the layout of policy_key in bpf/lib/common.h.
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
+type PolicyKey struct {
+	Identity         uint32
+	DestPort         uint16 // In network byte-order
+	Nexthdr          uint8
+	TrafficDirection uint8
 }
 
+// PolicyEntry represents an entry in the BPF policy map for an endpoint. It must
+// match the layout of policy_entry in bpf/lib/common.h.
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type PolicyEntry struct {
-	Action  uint32
-	Pad     uint32
-	Packets uint64
-	Bytes   uint64
+	ProxyPort uint16 // In network byte-order
+	Pad0      uint16
+	Pad1      uint16
+	Pad2      uint16
+	Packets   uint64
+	Bytes     uint64
 }
+
+func (pe *PolicyEntry) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(pe) }
+func (pe *PolicyEntry) NewValue() bpf.MapValue      { return &PolicyEntry{} }
 
 func (pe *PolicyEntry) Add(oPe PolicyEntry) {
 	pe.Packets += oPe.Packets
@@ -68,64 +99,133 @@ func (pe *PolicyEntry) Add(oPe PolicyEntry) {
 
 type PolicyEntryDump struct {
 	PolicyEntry
-	Key policyKey
+	Key PolicyKey
 }
 
-func (key *policyKey) String() string {
-	if key.DestPort != 0 {
-		return fmt.Sprintf("%d %d/%d", key.Identity, byteorder.NetworkToHost(key.DestPort), key.Nexthdr)
+// PolicyEntriesDump is a wrapper for a slice of PolicyEntryDump
+type PolicyEntriesDump []PolicyEntryDump
+
+// Less returns true if the element in index `i` has the value of
+// TrafficDirection lower than `j`'s TrafficDirection or if the element in index
+// `i` has the value of TrafficDirection lower and equal than `j`'s
+// TrafficDirection and the identity of element `i` is lower than the Identity
+// of element j.
+func (p PolicyEntriesDump) Less(i, j int) bool {
+	if p[i].Key.TrafficDirection < p[j].Key.TrafficDirection {
+		return true
 	}
-	return fmt.Sprintf("%d", key.Identity)
+	return p[i].Key.TrafficDirection <= p[j].Key.TrafficDirection &&
+		p[i].Key.Identity < p[j].Key.Identity
 }
 
-// AllowIdentity adds an entry into the PolicyMap with key id. Returns an error
-// if the addition did not complete successfully.
-func (pm *PolicyMap) AllowIdentity(id uint32) error {
-	key := policyKey{Identity: id}
-	entry := PolicyEntry{Action: 1}
-	return bpf.UpdateElement(pm.Fd, unsafe.Pointer(&key), unsafe.Pointer(&entry), 0)
+func (key *PolicyKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(key) }
+func (key *PolicyKey) NewValue() bpf.MapValue    { return &PolicyEntry{} }
+
+func (key *PolicyKey) String() string {
+
+	trafficDirectionString := (trafficdirection.TrafficDirection)(key.TrafficDirection).String()
+	if key.DestPort != 0 {
+		return fmt.Sprintf("%s: %d %d/%d", trafficDirectionString, key.Identity, byteorder.NetworkToHost(key.DestPort), key.Nexthdr)
+	}
+	return fmt.Sprintf("%s: %d", trafficDirectionString, key.Identity)
 }
 
-// AllowL4 pushes an entry into the PolicyMap to allow source identity `id`
-// send traffic with destination port `dport` over protocol `proto`.
-func (pm *PolicyMap) AllowL4(id uint32, dport uint16, proto uint8) error {
-	key := policyKey{Identity: id, DestPort: byteorder.HostToNetwork(dport).(uint16), Nexthdr: proto}
-	entry := PolicyEntry{Action: 1}
-	return bpf.UpdateElement(pm.Fd, unsafe.Pointer(&key), unsafe.Pointer(&entry), 0)
+// ToHost returns a copy of key with fields converted from network byte-order
+// to host-byte-order if necessary.
+func (key *PolicyKey) ToHost() PolicyKey {
+	if key == nil {
+		return PolicyKey{}
+	}
+
+	n := *key
+	n.DestPort = byteorder.NetworkToHost(n.DestPort).(uint16)
+	return n
 }
 
-// IdentityExists returns whether there is an entry in the PolicyMap with key id.
-func (pm *PolicyMap) IdentityExists(id uint32) bool {
-	key := policyKey{Identity: id}
-	var entry PolicyEntry
-	return bpf.LookupElement(pm.Fd, unsafe.Pointer(&key), unsafe.Pointer(&entry)) == nil
+// ToNetwork returns a copy of key with fields converted from host byte-order
+// to network-byte-order if necessary.
+func (key *PolicyKey) ToNetwork() PolicyKey {
+	if key == nil {
+		return PolicyKey{}
+	}
+
+	n := *key
+	n.DestPort = byteorder.HostToNetwork(n.DestPort).(uint16)
+	return n
 }
 
-// L4Exists determines whether PolicyMap currently contains an entry that
-// allows source identity `id` send traffic with destination port `dport` over
-// protocol `proto`.
-func (pm *PolicyMap) L4Exists(id uint32, dport uint16, proto uint8) bool {
-	key := policyKey{Identity: id, DestPort: byteorder.HostToNetwork(dport).(uint16), Nexthdr: proto}
-	var entry PolicyEntry
-	return bpf.LookupElement(pm.Fd, unsafe.Pointer(&key), unsafe.Pointer(&entry)) == nil
+// newKey returns a PolicyKey representing the specified parameters in network
+// byte-order.
+func newKey(id uint32, dport uint16, proto u8proto.U8proto, trafficDirection trafficdirection.TrafficDirection) PolicyKey {
+	return PolicyKey{
+		Identity:         id,
+		DestPort:         byteorder.HostToNetwork(dport).(uint16),
+		Nexthdr:          uint8(proto),
+		TrafficDirection: trafficDirection.Uint8(),
+	}
 }
 
-// DeleteIdentity deletes id from the PolicyMap. Returns an error if the deletion
-// did not succeed.
-func (pm *PolicyMap) DeleteIdentity(id uint32) error {
-	key := policyKey{Identity: id}
-	return bpf.DeleteElement(pm.Fd, unsafe.Pointer(&key))
+// newEntry returns a PolicyEntry representing the specified parameters in
+// network byte-order.
+func newEntry(proxyPort uint16) PolicyEntry {
+	return PolicyEntry{
+		ProxyPort: byteorder.HostToNetwork(proxyPort).(uint16),
+	}
 }
 
-// DeleteL4 removes an entry from the PolicyMap for source identity `id`
-// sending traffic with destination port `dport` over protocol `proto`.
-func (pm *PolicyMap) DeleteL4(id uint32, dport uint16, proto uint8) error {
-	key := policyKey{Identity: id, DestPort: byteorder.HostToNetwork(dport).(uint16), Nexthdr: proto}
-	return bpf.DeleteElement(pm.Fd, unsafe.Pointer(&key))
+// AllowKey pushes an entry into the PolicyMap for the given PolicyKey k.
+// Returns an error if the update of the PolicyMap fails.
+func (pm *PolicyMap) AllowKey(k PolicyKey, proxyPort uint16) error {
+	return pm.Allow(k.Identity, k.DestPort, u8proto.U8proto(k.Nexthdr), trafficdirection.TrafficDirection(k.TrafficDirection), proxyPort)
 }
 
+// Allow pushes an entry into the PolicyMap to allow traffic in the given
+// `trafficDirection` for identity `id` with destination port `dport` over
+// protocol `proto`. It is assumed that `dport` and `proxyPort` are in host byte-order.
+func (pm *PolicyMap) Allow(id uint32, dport uint16, proto u8proto.U8proto, trafficDirection trafficdirection.TrafficDirection, proxyPort uint16) error {
+	key := newKey(id, dport, proto, trafficDirection)
+	entry := newEntry(proxyPort)
+	return pm.Update(&key, &entry)
+}
+
+// Exists determines whether PolicyMap currently contains an entry that
+// allows traffic in `trafficDirection` for identity `id` with destination port
+// `dport`over protocol `proto`. It is assumed that `dport` is in host byte-order.
+func (pm *PolicyMap) Exists(id uint32, dport uint16, proto u8proto.U8proto, trafficDirection trafficdirection.TrafficDirection) bool {
+	key := newKey(id, dport, proto, trafficDirection)
+	_, err := pm.Lookup(&key)
+	return err == nil
+}
+
+// DeleteKey deletes the key-value pair from the given PolicyMap with PolicyKey
+// k. Returns an error if deletion from the PolicyMap fails.
+func (pm *PolicyMap) DeleteKeyWithErrno(key PolicyKey) (error, syscall.Errno) {
+	k := key.ToNetwork()
+	return pm.Map.DeleteWithErrno(&k)
+}
+
+// Delete removes an entry from the PolicyMap for identity `id`
+// sending traffic in direction `trafficDirection` with destination port `dport`
+// over protocol `proto`. It is assumed that `dport` is in host byte-order.
+// Returns an error if the deletion did not succeed.
+func (pm *PolicyMap) Delete(id uint32, dport uint16, proto u8proto.U8proto, trafficDirection trafficdirection.TrafficDirection) error {
+	k := newKey(id, dport, proto, trafficDirection)
+	return pm.Map.Delete(&k)
+}
+
+// DeleteEntry removes an entry from the PolicyMap. It can be used in
+// conjunction with DumpToSlice() to inspect and delete map entries.
+func (pm *PolicyMap) DeleteEntry(entry *PolicyEntryDump) error {
+	return pm.Map.Delete(&entry.Key)
+}
+
+// String returns a human-readable string representing the policy map.
 func (pm *PolicyMap) String() string {
-	return pm.path
+	path, err := pm.Path()
+	if err != nil {
+		return err.Error()
+	}
+	return path
 }
 
 func (pm *PolicyMap) Dump() (string, error) {
@@ -135,122 +235,64 @@ func (pm *PolicyMap) Dump() (string, error) {
 		return "", err
 	}
 	for _, entry := range entries {
-		buffer.WriteString(fmt.Sprintf("%20s: %d %d %d\n",
-			entry.Key.String(), entry.Action, entry.Packets, entry.Bytes))
+		buffer.WriteString(fmt.Sprintf("%20s: %s\n",
+			entry.Key.String(), entry.PolicyEntry.String()))
 	}
 	return buffer.String(), nil
 }
 
-func (pm *PolicyMap) DumpToSlice() ([]PolicyEntryDump, error) {
-	var key, nextKey policyKey
-	entries := []PolicyEntryDump{}
-	for {
-		var entry PolicyEntry
-		err := bpf.GetNextKey(
-			pm.Fd,
-			unsafe.Pointer(&key),
-			unsafe.Pointer(&nextKey),
-		)
+func (pm *PolicyMap) DumpToSlice() (PolicyEntriesDump, error) {
+	entries := PolicyEntriesDump{}
 
-		if err != nil {
-			break
+	cb := func(key bpf.MapKey, value bpf.MapValue) {
+		eDump := PolicyEntryDump{
+			Key:         *key.DeepCopyMapKey().(*PolicyKey),
+			PolicyEntry: *value.DeepCopyMapValue().(*PolicyEntry),
 		}
-
-		err = bpf.LookupElement(
-			pm.Fd,
-			unsafe.Pointer(&nextKey),
-			unsafe.Pointer(&entry),
-		)
-
-		if err != nil {
-			return nil, err
-		}
-		eDump := PolicyEntryDump{Key: nextKey, PolicyEntry: entry}
 		entries = append(entries, eDump)
-
-		key = nextKey
 	}
+	err := pm.DumpWithCallback(cb)
 
-	return entries, nil
+	return entries, err
 }
 
-// Flush deletes all entries from the given policy map
-func (pm *PolicyMap) Flush() error {
-	var key, nextKey policyKey
-	for {
-		err := bpf.GetNextKey(
-			pm.Fd,
-			unsafe.Pointer(&key),
-			unsafe.Pointer(&nextKey),
-		)
-
-		// FIXME: Ignore delete errors?
-		bpf.DeleteElement(
-			pm.Fd,
-			unsafe.Pointer(&key),
-		)
-
-		if err != nil {
-			break
-		}
-
-		key = nextKey
+func newMap(path string) *PolicyMap {
+	mapType := bpf.MapType(bpf.BPF_MAP_TYPE_HASH)
+	flags := bpf.GetPreAllocateMapFlags(mapType)
+	return &PolicyMap{
+		Map: bpf.NewMap(
+			path,
+			mapType,
+			&PolicyKey{},
+			int(unsafe.Sizeof(PolicyKey{})),
+			&PolicyEntry{},
+			int(unsafe.Sizeof(PolicyEntry{})),
+			MaxEntries,
+			flags, 0,
+			bpf.ConvertKeyValue,
+		),
 	}
-	return nil
 }
 
-// Close closes the FD of the given PolicyMap
-func (pm *PolicyMap) Close() error {
-	return bpf.ObjClose(pm.Fd)
+// OpenOrCreate opens (or creates) a policy map at the specified path, which
+// is used to govern which peer identities can communicate with the endpoint
+// protected by this map.
+func OpenOrCreate(path string) (*PolicyMap, bool, error) {
+	m := newMap(path)
+	isNewMap, err := m.OpenOrCreate()
+	return m, isNewMap, err
 }
 
-// Validate checks the map pinned to the specified path to ensure that the map
-// attributes such as type, key length, value length are the same as for the
-// current version of Cilium.
-func Validate(path string) (bool, error) {
-	dummy := bpf.NewMap(path, bpf.BPF_MAP_TYPE_HASH,
-		int(unsafe.Sizeof(policyKey{})),
-		int(unsafe.Sizeof(PolicyEntry{})), MAX_KEYS, 0)
-
-	existing, err := bpf.OpenMap(path)
-	if err != nil {
-		return true, err
-	}
-
-	logging.MultiLine(log.Debug, comparator.Compare(existing, dummy))
-
-	if existing != nil && !existing.DeepEquals(dummy) {
-		return false, nil
-	}
-
-	return true, nil
-}
-
-func OpenMap(path string) (*PolicyMap, bool, error) {
-	fd, isNewMap, err := bpf.OpenOrCreateMap(
-		path,
-		bpf.BPF_MAP_TYPE_HASH,
-		uint32(unsafe.Sizeof(policyKey{})),
-		uint32(unsafe.Sizeof(PolicyEntry{})),
-		MAX_KEYS,
-		0,
-	)
-
-	if err != nil {
-		return nil, false, err
-	}
-
-	m := &PolicyMap{path: path, Fd: fd}
-
-	return m, isNewMap, nil
-}
-
-func OpenGlobalMap(path string) (*PolicyMap, error) {
-	fd, err := bpf.ObjGet(path)
-	if err != nil {
+// Open opens the policymap at the specified path.
+func Open(path string) (*PolicyMap, error) {
+	m := newMap(path)
+	if err := m.Open(); err != nil {
 		return nil, err
 	}
-
-	m := &PolicyMap{path: path, Fd: fd}
 	return m, nil
+}
+
+// InitMapInfo updates the map info defaults for policy maps.
+func InitMapInfo(maxEntries int) {
+	MaxEntries = maxEntries
 }

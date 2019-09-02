@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,11 +18,11 @@ import (
 	"fmt"
 	"net"
 
-	"k8s.io/apimachinery/pkg/labels"
-
-	"github.com/cilium/cilium/common/types"
+	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 var _ policy.Translator = RuleTranslator{}
@@ -31,16 +31,17 @@ var _ policy.Translator = RuleTranslator{}
 // Translate populates/depopulates given rule with ToCIDR rules
 // Based on provided service/endpoint
 type RuleTranslator struct {
-	Service       types.K8sServiceNamespace
-	Endpoint      types.K8sServiceEndpoint
-	ServiceLabels map[string]string
-	Revert        bool
+	Service          ServiceID
+	Endpoint         Endpoints
+	ServiceLabels    map[string]string
+	Revert           bool
+	AllocatePrefixes bool
 }
 
 // Translate calls TranslateEgress on all r.Egress rules
-func (k RuleTranslator) Translate(r *api.Rule) error {
+func (k RuleTranslator) Translate(r *api.Rule, result *policy.TranslationResult) error {
 	for egressIndex := range r.Egress {
-		err := k.TranslateEgress(&r.Egress[egressIndex])
+		err := k.TranslateEgress(&r.Egress[egressIndex], result)
 		if err != nil {
 			return err
 		}
@@ -50,13 +51,15 @@ func (k RuleTranslator) Translate(r *api.Rule) error {
 
 // TranslateEgress populates/depopulates egress rules with ToCIDR entries based
 // on toService entries
-func (k RuleTranslator) TranslateEgress(r *api.EgressRule) error {
-	err := k.depopulateEgress(r)
+func (k RuleTranslator) TranslateEgress(r *api.EgressRule, result *policy.TranslationResult) error {
+
+	defer r.SetAggregatedSelectors()
+	err := k.depopulateEgress(r, result)
 	if err != nil {
 		return err
 	}
 	if !k.Revert {
-		err := k.populateEgress(r)
+		err := k.populateEgress(r, result)
 		if err != nil {
 			return err
 		}
@@ -64,10 +67,10 @@ func (k RuleTranslator) TranslateEgress(r *api.EgressRule) error {
 	return nil
 }
 
-func (k RuleTranslator) populateEgress(r *api.EgressRule) error {
+func (k RuleTranslator) populateEgress(r *api.EgressRule, result *policy.TranslationResult) error {
 	for _, service := range r.ToServices {
 		if k.serviceMatches(service) {
-			if err := generateToCidrFromEndpoint(r, k.Endpoint); err != nil {
+			if err := generateToCidrFromEndpoint(r, k.Endpoint, k.AllocatePrefixes); err != nil {
 				return err
 			}
 			// TODO: generateToPortsFromEndpoint when ToPorts and ToCIDR are compatible
@@ -76,10 +79,13 @@ func (k RuleTranslator) populateEgress(r *api.EgressRule) error {
 	return nil
 }
 
-func (k RuleTranslator) depopulateEgress(r *api.EgressRule) error {
+func (k RuleTranslator) depopulateEgress(r *api.EgressRule, result *policy.TranslationResult) error {
 	for _, service := range r.ToServices {
+		// NumToServicesRules are only counted in depopulate to avoid
+		// counting rules twice
+		result.NumToServicesRules++
 		if k.serviceMatches(service) {
-			if err := deleteToCidrFromEndpoint(r, k.Endpoint); err != nil {
+			if err := deleteToCidrFromEndpoint(r, k.Endpoint, k.AllocatePrefixes); err != nil {
 				return err
 			}
 			// TODO: generateToPortsFromEndpoint when ToPorts and ToCIDR are compatible
@@ -91,12 +97,14 @@ func (k RuleTranslator) depopulateEgress(r *api.EgressRule) error {
 func (k RuleTranslator) serviceMatches(service api.Service) bool {
 	if service.K8sServiceSelector != nil {
 		es := api.EndpointSelector(service.K8sServiceSelector.Selector)
-		return es.Matches(labels.Set(k.ServiceLabels)) &&
+		es.SyncRequirementsWithLabelSelector()
+		esMatches := es.Matches(labels.Set(k.ServiceLabels))
+		return esMatches &&
 			(service.K8sServiceSelector.Namespace == k.Service.Namespace || service.K8sServiceSelector.Namespace == "")
 	}
 
 	if service.K8sService != nil {
-		return service.K8sService.ServiceName == k.Service.ServiceName &&
+		return service.K8sService.ServiceName == k.Service.Name &&
 			(service.K8sService.Namespace == k.Service.Namespace || service.K8sService.Namespace == "")
 	}
 
@@ -106,14 +114,30 @@ func (k RuleTranslator) serviceMatches(service api.Service) bool {
 // generateToCidrFromEndpoint takes an egress rule and populates it with
 // ToCIDR rules based on provided endpoint object
 func generateToCidrFromEndpoint(
-	egress *api.EgressRule, endpoint types.K8sServiceEndpoint) error {
+	egress *api.EgressRule,
+	endpoint Endpoints,
+	allocatePrefixes bool) error {
+
+	// allocatePrefixes if true here implies that this translation is
+	// occurring after policy import. This means that the CIDRs were not
+	// known at that time, so the IPCache hasn't been informed about them.
+	// In this case, it's the job of this Translator to notify the IPCache.
+	if allocatePrefixes {
+		prefixes, err := endpoint.CIDRPrefixes()
+		if err != nil {
+			return err
+		}
+		if _, err := ipcache.AllocateCIDRs(prefixes); err != nil {
+			return err
+		}
+	}
 
 	// This will generate one-address CIDRs consisting of endpoint backend ip
 	mask := net.CIDRMask(128, 128)
-	for ip := range endpoint.BEIPs {
+	for ip := range endpoint.Backends {
 		epIP := net.ParseIP(ip)
 		if epIP == nil {
-			return fmt.Errorf("Unable to parse ip: %s", ip)
+			return fmt.Errorf("unable to parse ip: %s", ip)
 		}
 
 		found := false
@@ -138,17 +162,26 @@ func generateToCidrFromEndpoint(
 	return nil
 }
 
-// deleteToCidrFromEndpoint takes an egress rule and removes
-// ToCIDR rules matching endpoint
+// deleteToCidrFromEndpoint takes an egress rule and removes ToCIDR rules
+// matching endpoint. Returns an error if any of the backends are malformed.
+//
+// If all backends are valid, attempts to remove any ipcache CIDR mappings (and
+// CIDR Identities) from the kvstore for backends in 'endpoint' that are being
+// removed from the policy. On failure to release such kvstore mappings, errors
+// will be logged but this function will return nil to allow subsequent
+// processing to proceed.
 func deleteToCidrFromEndpoint(
-	egress *api.EgressRule, endpoint types.K8sServiceEndpoint) error {
+	egress *api.EgressRule,
+	endpoint Endpoints,
+	releasePrefixes bool) error {
 
 	newToCIDR := make([]api.CIDRRule, 0, len(egress.ToCIDRSet))
+	deleted := make([]api.CIDRRule, 0, len(egress.ToCIDRSet))
 
-	for ip := range endpoint.BEIPs {
+	for ip := range endpoint.Backends {
 		epIP := net.ParseIP(ip)
 		if epIP == nil {
-			return fmt.Errorf("Unable to parse ip: %s", ip)
+			return fmt.Errorf("unable to parse ip: %s", ip)
 		}
 
 		for _, c := range egress.ToCIDRSet {
@@ -160,27 +193,33 @@ func deleteToCidrFromEndpoint(
 			// generated it's ok to retain it
 			if !cidr.Contains(epIP) || !c.Generated {
 				newToCIDR = append(newToCIDR, c)
+			} else {
+				deleted = append(deleted, c)
 			}
 		}
 	}
 
 	egress.ToCIDRSet = newToCIDR
+	if releasePrefixes {
+		prefixes := policy.GetPrefixesFromCIDRSet(deleted)
+		ipcache.ReleaseCIDRs(prefixes)
+	}
 
 	return nil
 }
 
 // PreprocessRules translates rules that apply to headless services
-func PreprocessRules(
-	r api.Rules,
-	endpoints map[types.K8sServiceNamespace]*types.K8sServiceEndpoint,
-	services map[types.K8sServiceNamespace]*types.K8sServiceInfo) error {
+func PreprocessRules(r api.Rules, cache *ServiceCache) error {
+
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
 
 	for _, rule := range r {
-		for ns, ep := range endpoints {
-			svc, ok := services[ns]
-			if ok && svc.IsHeadless {
-				t := NewK8sTranslator(ns, *ep, false, svc.Labels)
-				err := t.Translate(rule)
+		for ns, ep := range cache.endpoints {
+			svc, ok := cache.services[ns]
+			if ok && svc.IsExternal() {
+				t := NewK8sTranslator(ns, *ep, false, svc.Labels, false)
+				err := t.Translate(rule, &policy.TranslationResult{})
 				if err != nil {
 					return err
 				}
@@ -192,10 +231,11 @@ func PreprocessRules(
 
 // NewK8sTranslator returns RuleTranslator
 func NewK8sTranslator(
-	serviceInfo types.K8sServiceNamespace,
-	endpoint types.K8sServiceEndpoint,
+	serviceInfo ServiceID,
+	endpoint Endpoints,
 	revert bool,
-	labels map[string]string) RuleTranslator {
+	labels map[string]string,
+	allocatePrefixes bool) RuleTranslator {
 
-	return RuleTranslator{serviceInfo, endpoint, labels, revert}
+	return RuleTranslator{serviceInfo, endpoint, labels, revert, allocatePrefixes}
 }

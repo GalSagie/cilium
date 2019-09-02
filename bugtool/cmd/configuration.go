@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,10 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cilium/cilium/daemon/defaults"
-	"github.com/cilium/cilium/pkg/logging/logfields"
-
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/cilium/pkg/components"
+	"github.com/cilium/cilium/pkg/defaults"
 )
 
 // BugtoolConfiguration creates and loads the configuration file used to run
@@ -46,31 +44,65 @@ func defaultCommands(confDir string, cmdDir string, k8sPods []string) []string {
 	// Not expecting all of the commands to be available
 	commands = []string{
 		// Host and misc
-		"ps",
+		"ps auxfw",
 		"hostname",
 		"ip a",
-		"ip r",
-		"ip link",
+		"ip -4 r",
+		"ip -6 r",
+		"ip -d -s l",
+		"ip -4 n",
+		"ip -6 n",
+		"ss -t -p -a -i -s",
+		"ss -u -p -a -i -s",
+		"nstat",
 		"uname -a",
 		"dig",
-		"netstat",
+		"netstat -a",
 		"pidstat",
 		"arp",
 		"top -b -n 1",
 		"uptime",
-		"dmesg",
+		"dmesg --time-format=iso",
 		"bpftool map show",
 		"bpftool prog show",
+		// LB and CT map for debugging services; using bpftool for a reliable dump
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb4_services_v2",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb4_services",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb4_backends",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb4_reverse_nat",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_ct4_global",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_ct_any4_global",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb6_services_v2",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb6_services",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb6_backends",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_lb6_reverse_nat",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_ct6_global",
+		"bpftool map dump pinned /sys/fs/bpf/tc/globals/cilium_ct_any6_global",
 		// Versions
 		"docker version",
+		"docker info",
 		// Docker and Kubernetes logs from systemd
 		"journalctl -u cilium*",
 		"journalctl -u kubelet",
 		// iptables
-		"iptables-save",
+		"iptables-save -c",
 		"iptables -S",
 		"ip6tables -S",
 		"iptables -L -v",
+		"ip rule",
+		"ip -4 route show table 2005",
+		"ip -6 route show table 2005",
+		"ip -4 route show table 200",
+		"ip -6 route show table 200",
+		// xfrm
+		"ip xfrm policy",
+		"ip -s xfrm state | awk '!/auth|enc/'",
+		// gops
+		fmt.Sprintf("gops memstats $(pidof %s)", components.CiliumAgentName),
+		fmt.Sprintf("gops stack $(pidof %s)", components.CiliumAgentName),
+		fmt.Sprintf("gops stats $(pidof %s)", components.CiliumAgentName),
+		// Get list of open file descriptors managed by the agent
+		fmt.Sprintf("ls -la /proc/$(pidof %s)/fd", components.CiliumAgentName),
 	}
 
 	// Commands that require variables and / or more configuration are added
@@ -104,8 +136,6 @@ func save(c *BugtoolConfiguration, path string) error {
 func loadConfigFile(path string) (*BugtoolConfiguration, error) {
 	var content []byte
 	var err error
-	logrus.WithField(logfields.Path, path).Debug("Loading file")
-
 	content, err = ioutil.ReadFile(path)
 
 	if err != nil {
@@ -119,10 +149,10 @@ func loadConfigFile(path string) (*BugtoolConfiguration, error) {
 
 func catCommands() []string {
 	files := []string{
+		"/proc/net/xfrm_stat",
 		"/proc/sys/net/core/bpf_jit_enable",
 		"/proc/kallsyms",
 		"/etc/resolv.conf",
-		"/var/log/upstart/docker.log",
 		"/var/log/docker.log",
 		"/var/log/daemon.log",
 		"/var/log/messages",
@@ -142,7 +172,7 @@ func catCommands() []string {
 
 func copyConfigCommands(confDir string, k8sPods []string) []string {
 	commands := []string{}
-	// Location is a convenince structure to avoid too many long lines
+	// Location is a convenience structure to avoid too many long lines
 	type Location struct {
 		Src string
 		Dst string
@@ -160,7 +190,7 @@ func copyConfigCommands(confDir string, k8sPods []string) []string {
 	// them to be one block is the pod prefix and namespace used in the
 	// path. This should be refactored.
 	if len(k8sPods) == 0 {
-		kernel, _ := execCommand("uname", "-r")
+		kernel, _ := execCommand("uname -r")
 		kernel = strings.TrimSpace(kernel)
 		// Append the boot config for the current kernel
 		l := Location{fmt.Sprintf("/boot/config-%s", kernel),
@@ -179,8 +209,7 @@ func copyConfigCommands(confDir string, k8sPods []string) []string {
 		// configs. Therefore we need copy commands for all the pods.
 		for _, pod := range k8sPods {
 			prompt := podPrefix(pod, "uname -r")
-			cmd, args := split(prompt)
-			kernel, _ := execCommand(cmd, args...)
+			kernel, _ := execCommand(prompt)
 			kernel = strings.TrimSpace(kernel)
 			l := Location{fmt.Sprintf("/boot/config-%s", kernel),
 				fmt.Sprintf("%s/kernel-config-%s", confDir, kernel)}
@@ -204,13 +233,24 @@ func copyCiliumInfoCommands(cmdDir string, k8sPods []string) []string {
 	// Most of the output should come via debuginfo but also adding
 	// these ones for skimming purposes
 	ciliumCommands := []string{
-		"cilium debuginfo",
+		fmt.Sprintf("cilium debuginfo --output=markdown,json -f --output-directory=%s", cmdDir),
+		"cilium metrics list",
+		"cilium fqdn cache list",
 		"cilium config",
 		"cilium bpf tunnel list",
 		"cilium bpf lb list",
 		"cilium bpf endpoint list",
 		"cilium bpf ct list global",
+		"cilium bpf nat list",
+		"cilium bpf proxy list",
+		"cilium bpf ipcache list",
+		"cilium bpf policy get --all --numeric",
+		"cilium bpf sha list",
+		"cilium map list --verbose",
 		"cilium status --verbose",
+		"cilium identity list",
+		"cilium-health status",
+		"cilium policy selectors -o json",
 	}
 	var commands []string
 
@@ -247,9 +287,11 @@ func copyCiliumInfoCommands(cmdDir string, k8sPods []string) []string {
 func k8sCommands(allCommands []string, pods []string) []string {
 	// These commands do not require a pod argument
 	var commands = []string{
+		"kubectl get nodes -o wide",
 		"kubectl describe nodes",
 		"kubectl get pods,svc --all-namespaces",
 		"kubectl version",
+		fmt.Sprintf("kubectl get cm cilium-config -n %s", k8sNamespace),
 	}
 
 	// Prepare to run all the commands inside of the pod(s)
@@ -267,8 +309,15 @@ func k8sCommands(allCommands []string, pods []string) []string {
 			commands = append(commands, cmd)
 		}
 
-		// Check for previous logs of the pod
-		cmd := fmt.Sprintf("kubectl -n %s logs --previous -p %s", k8sNamespace, pod)
+		// Retrieve current version of pod logs
+		cmd := fmt.Sprintf("kubectl -n %s logs --timestamps %s", k8sNamespace, pod)
+		commands = append(commands, cmd)
+
+		// Retrieve previous version of pod logs
+		cmd = fmt.Sprintf("kubectl -n %s logs --timestamps -p %s", k8sNamespace, pod)
+		commands = append(commands, cmd)
+
+		cmd = fmt.Sprintf("kubectl -n %s describe pod %s", k8sNamespace, pod)
 		commands = append(commands, cmd)
 	}
 

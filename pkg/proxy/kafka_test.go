@@ -12,20 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package proxy
 
 import (
+	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/cilium/cilium/common/addressing"
+	"github.com/cilium/cilium/pkg/completion"
+	"github.com/cilium/cilium/pkg/datapath"
+	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/endpoint/regeneration"
+	"github.com/cilium/cilium/pkg/endpointmanager"
+	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/proxy/logger"
+	"github.com/cilium/cilium/pkg/revert"
 
 	"github.com/optiopay/kafka"
 	"github.com/optiopay/kafka/proto"
 	"github.com/sirupsen/logrus"
+
 	. "gopkg.in/check.v1"
 )
 
@@ -34,18 +52,77 @@ func Test(t *testing.T) {
 	TestingT(t)
 }
 
-type proxyTestSuite struct{}
+type proxyTestSuite struct {
+	repo *policy.Repository
+}
 
 var _ = Suite(&proxyTestSuite{})
 
+func (s *proxyTestSuite) SetUpSuite(c *C) {
+	s.repo = policy.NewPolicyRepository()
+}
+
+func (s *proxyTestSuite) GetPolicyRepository() *policy.Repository {
+	return s.repo
+}
+
+func (s *proxyTestSuite) UpdateProxyRedirect(e regeneration.EndpointUpdater, l4 *policy.L4Filter, wg *completion.WaitGroup) (uint16, error, revert.FinalizeFunc, revert.RevertFunc) {
+	return 0, nil, nil, nil
+}
+
+func (s *proxyTestSuite) RemoveProxyRedirect(e regeneration.EndpointInfoSource, id string, wg *completion.WaitGroup) (error, revert.FinalizeFunc, revert.RevertFunc) {
+	return nil, nil, nil
+}
+
+func (s *proxyTestSuite) UpdateNetworkPolicy(e regeneration.EndpointUpdater, policy *policy.L4Policy,
+	proxyWaitGroup *completion.WaitGroup) (error, revert.RevertFunc) {
+	return nil, nil
+}
+
+func (s *proxyTestSuite) RemoveNetworkPolicy(e regeneration.EndpointInfoSource) {}
+
+func (s *proxyTestSuite) QueueEndpointBuild(ctx context.Context, epID uint64) (func(), error) {
+	return nil, nil
+}
+
+func (s *proxyTestSuite) RemoveFromEndpointQueue(epID uint64) {}
+
+func (s *proxyTestSuite) GetCompilationLock() *lock.RWMutex {
+	return nil
+}
+
+func (s *proxyTestSuite) SendNotification(typ monitorAPI.AgentNotification, text string) error {
+	return nil
+}
+
+func (s *proxyTestSuite) Datapath() datapath.Datapath {
+	return nil
+}
+
+func (s *proxyTestSuite) GetNodeSuffix() string {
+	return ""
+}
+
+func (s *proxyTestSuite) UpdateIdentities(added, deleted cache.IdentityCache) {}
+
+type DummySelectorCacheUser struct{}
+
+func (d *DummySelectorCacheUser) IdentitySelectionUpdated(selector policy.CachedSelector, selections, added, deleted []identity.NumericIdentity) {
+}
+
 var (
-	sourceMocker = &proxySourceMocker{
+	localEndpointMock logger.EndpointUpdater = &proxyUpdaterMock{
 		id:       1000,
 		ipv4:     "10.0.0.1",
 		ipv6:     "f00d::1",
 		labels:   []string{"id.foo", "id.bar"},
-		identity: policy.NumericIdentity(256),
+		identity: identity.NumericIdentity(256),
 	}
+
+	dummySelectorCacheUser = &DummySelectorCacheUser{}
+	testSelectorCache      = policy.NewSelectorCache(cache.IdentityCache{})
+
+	wildcardCachedSelector, _ = testSelectorCache.AddIdentitySelector(dummySelectorCacheUser, api.WildcardEndpointSelector)
 )
 
 // newTestBrokerConf returns BrokerConf with default configuration adjusted for
@@ -74,19 +151,19 @@ func (loggerMap) Warn(msg string, args ...interface{})  { log.WithFields(fields(
 func (loggerMap) Error(msg string, args ...interface{}) { log.WithFields(fields(args...)).Error(msg) }
 
 var (
-	proxyAddress, proxyPort = "127.0.0.1", 15000
+	proxyAddress = "127.0.0.1"
 )
 
 type metadataTester struct {
 	host               string
-	port               int
+	port               uint16
 	topics             map[string]bool
 	allowCreate        bool
 	numGeneralFetches  int
 	numSpecificFetches int
 }
 
-func newMetadataHandler(srv *Server, allowCreate bool) *metadataTester {
+func newMetadataHandler(srv *Server, allowCreate bool, proxyPort uint16) *metadataTester {
 	tester := &metadataTester{
 		host:        proxyAddress,
 		port:        proxyPort,
@@ -161,13 +238,11 @@ func (m *metadataTester) Handler() RequestHandler {
 	}
 }
 
-func (k *proxyTestSuite) TestKafkaRedirect(c *C) {
-	// this isn't thread safe but there is no function to get it
-	// SetLevel is atomic, however.
-	oldLevel := log.Level
-	defer log.SetLevel(oldLevel)
-	log.SetLevel(logrus.DebugLevel)
+type dummyEpSyncher struct{}
 
+func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint) {}
+
+func (s *proxyTestSuite) TestKafkaRedirect(c *C) {
 	server := NewServer()
 	server.Start()
 	defer server.Close()
@@ -176,8 +251,16 @@ func (k *proxyTestSuite) TestKafkaRedirect(c *C) {
 		"address": server.Address(),
 	}).Debug("Started kafka server")
 
-	_, serverPort := server.HostPort()
-	proxyAddress := fmt.Sprintf("%s:%d", proxyAddress, uint16(proxyPort))
+	pp := getProxyPort(policy.ParserTypeKafka, true)
+	c.Assert(pp.configured, Equals, false)
+	var err error
+	pp.proxyPort, err = allocatePort(pp.proxyPort, 10000, 20000)
+	c.Assert(err, IsNil)
+	c.Assert(pp.proxyPort, Not(Equals), 0)
+	pp.reservePort()
+	c.Assert(pp.configured, Equals, true)
+
+	proxyAddress := fmt.Sprintf("%s:%d", proxyAddress, uint16(pp.proxyPort))
 
 	kafkaRule1 := api.PortRuleKafka{APIKey: "metadata", APIVersion: "0"}
 	c.Assert(kafkaRule1.Sanitize(), IsNil)
@@ -185,28 +268,39 @@ func (k *proxyTestSuite) TestKafkaRedirect(c *C) {
 	kafkaRule2 := api.PortRuleKafka{APIKey: "produce", APIVersion: "0", Topic: "allowedTopic"}
 	c.Assert(kafkaRule2.Sanitize(), IsNil)
 
-	redir, err := createKafkaRedirect(kafkaConfiguration{
-		policy: &policy.L4Filter{
-			Port:           serverPort,
-			Protocol:       api.ProtoTCP,
-			L7Parser:       policy.ParserTypeKafka,
-			L7RedirectPort: proxyPort,
-			L7RulesPerEp: policy.L7DataMap{
-				policy.WildcardEndpointSelector: api.L7Rules{
-					Kafka: []api.PortRuleKafka{kafkaRule1, kafkaRule2},
-				},
-			},
-			Ingress: true,
+	// Inject endpointmanager into DefaultEndpointInfoRegistry.
+	epMgr := endpointmanager.NewEndpointManager(&dummyEpSyncher{})
+	endpointManager = epMgr
+
+	// Insert a mock EP to the endpointmanager so that DefaultEndpointInfoRegistry may find
+	// the EP ID by the IP.
+	ep := endpoint.NewEndpointWithState(s, uint16(localEndpointMock.GetID()), endpoint.StateReady)
+	ipv4, err := addressing.NewCiliumIPv4("127.0.0.1")
+	c.Assert(err, IsNil)
+	ep.IPv4 = ipv4
+	ep.UpdateLogger(nil)
+	ep.Expose(epMgr)
+	defer ep.Unexpose(epMgr)
+
+	_, dstPortStr, err := net.SplitHostPort(server.Address())
+	c.Assert(err, IsNil)
+	portInt, err := strconv.Atoi(dstPortStr)
+	c.Assert(err, IsNil)
+	r := newRedirect(localEndpointMock, pp, uint16(portInt))
+
+	r.rules = policy.L7DataMap{
+		wildcardCachedSelector: api.L7Rules{
+			Kafka: []api.PortRuleKafka{kafkaRule1, kafkaRule2},
 		},
-		id:         "foo",
-		source:     sourceMocker,
-		listenPort: uint16(proxyPort),
-		lookupNewDest: func(remoteAddr string, dport uint16) (uint32, string, error) {
-			return uint32(200), server.Address(), nil
+	}
+
+	redir, err := createKafkaRedirect(r, kafkaConfiguration{
+		lookupSrcID: func(mapname, remoteAddr, localAddr string, ingress bool) (uint32, error) {
+			return uint32(1000), nil
 		},
-		// Disable use of SO_MARK
-		noMarker: true,
-	})
+		// Disable use of SO_MARK, IP_TRANSPARENT for tests
+		testMode: true,
+	}, DefaultEndpointInfoRegistry)
 	c.Assert(err, IsNil)
 	defer redir.Close(nil)
 
@@ -214,7 +308,7 @@ func (k *proxyTestSuite) TestKafkaRedirect(c *C) {
 		"address": proxyAddress,
 	}).Debug("Started kafka proxy")
 
-	server.Handle(MetadataRequest, newMetadataHandler(server, false).Handler())
+	server.Handle(MetadataRequest, newMetadataHandler(server, false, r.listener.proxyPort).Handler())
 
 	broker, err := kafka.Dial([]string{proxyAddress}, newTestBrokerConf("tester"))
 	if err != nil {
@@ -261,7 +355,8 @@ func (k *proxyTestSuite) TestKafkaRedirect(c *C) {
 	c.Assert(err, Equals, proto.ErrTopicAuthorizationFailed)
 
 	log.Debug("Testing done, closing listen socket")
-	redir.Close(nil)
+	finalize, _ := redir.Close(nil)
+	finalize()
 
 	// In order to see in the logs that the connections get closed after the
 	// 1-minute timeout, uncomment this line:

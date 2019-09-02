@@ -1,11 +1,17 @@
-************************************
-Getting Started Using Docker Compose
-************************************
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
+.. _gsg_docker:
+
+*******************************
+Cilium with Docker & libnetwork
+*******************************
 
 This tutorial leverages Vagrant and VirtualBox, thus should run on any
 operating system supported by Vagrant, including Linux, macOS, and Windows.
-
-.. include:: gsg_intro.rst
 
 Step 0: Install Vagrant
 =======================
@@ -38,7 +44,7 @@ Then navigate into ``examples/getting-started`` and run ``vagrant up``:
 
 The script usually takes a few minutes depending on the speed of your internet
 connection. Vagrant will set up a VM, install the Docker container runtime and
-run Cilium with the help of Docker compose. When the script completes successfully,
+run Cilium with the help of `Docker Compose`_. When the script completes successfully,
 it will print:
 
 ::
@@ -51,6 +57,8 @@ it will print:
 If the script exits with an error message, do not attempt to proceed with the
 tutorial, as later steps will not work properly.   Instead, contact us on the
 `Cilium Slack channel <https://cilium.herokuapp.com>`_.
+
+.. _`Docker Compose`: https://docs.docker.com/compose/
 
 Step 3: Accessing the VM
 ========================
@@ -79,11 +87,15 @@ it using the ``cilium`` CLI client. Check the status of the agent by running
 ::
 
     $ cilium status
-    KVStore:            Ok         Consul: 172.18.0.2:8300
-    ContainerRuntime:   Ok
-    Kubernetes:         Disabled
-    Cilium:             Ok         OK
-    NodeMonitor:        Listening for events on 1 CPUs with 64x4096 of shared memory
+    KVStore:                Ok         Consul: 172.18.0.2:8300
+    ContainerRuntime:       Ok         
+    Kubernetes:             Disabled   
+    Cilium:                 Ok         OK
+    NodeMonitor:            Listening for events on 1 CPUs with 64x4096 of shared memory
+    Cilium health daemon:   Ok   
+    Controller Status:      6/6 healthy
+    Proxy Status:           OK, ip 10.15.28.238, port-range 10000-20000
+    Cluster health:   1/1 reachable   (2018-04-05T16:08:22Z)
 
 The status indicates that all components are operational with the Kubernetes
 integration currently being disabled.
@@ -124,7 +136,7 @@ Docker network managed by Cilium:
 
 
 This has launched a container running an HTTP server which Cilium is now
-managing as an `endpoint`. A Cilium endpoint is one or more application
+managing as an :ref:`endpoint`. A Cilium endpoint is one or more application
 containers which can be addressed by an individual IP address.
 
 
@@ -144,8 +156,8 @@ to be reachable on port 80, but no other ports.  This is a simple policy that
 filters only on IP address (network layer 3) and TCP port (network layer 4), so
 it is often referred to as an L3/L4 network security policy.
 
-Cilium performs stateful ''connection tracking'', meaning that if policy allows
-the *app2* to contact *app3*, it will automatically allow return
+Cilium performs stateful ''connection tracking'', meaning that if a policy allows
+*app2* to contact *app1*, it will automatically allow return
 packets that are part of *app1* replying to *app2* within the context
 of the same TCP/UDP connection.
 
@@ -216,7 +228,7 @@ For example, consider a scenario where *app1* has two API calls:
  * GET /private
 
 Continuing with the example from above, if *app2* requires access only to
-the GET /public API call, the L3/L4 policy along has no visibility into the
+the GET /public API call, the L3/L4 policy alone has no visibility into the
 HTTP requests, and therefore would allow any HTTP request from *app2*
 (since all HTTP is over port 80).
 

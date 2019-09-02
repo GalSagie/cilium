@@ -116,13 +116,16 @@ func (driver *driver) requestAddress(w http.ResponseWriter, r *http.Request) {
 		family = client.AddressFamilyIPv6
 	}
 
-	ipam, err := driver.client.IPAMAllocate(family)
+	ipam, err := driver.client.IPAMAllocate(family, "docker-ipam")
 	if err != nil {
 		sendError(w, fmt.Sprintf("Could not allocate IP address: %s", err), http.StatusBadRequest)
 		return
 	}
 
-	addr := ipam.Endpoint
+	// The host addressing may have changed due to a daemon restart, update it
+	driver.updateRoutes(ipam.HostAddressing)
+
+	addr := ipam.Address
 	if addr == nil {
 		sendError(w, "No IP addressing provided", http.StatusBadRequest)
 		return

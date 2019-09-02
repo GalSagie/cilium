@@ -1,21 +1,52 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 .. _getting_help:
 
 ############
 Getting Help
 ############
 
-We use GitHub issues to maintain a list of `Cilium Frequently Asked Questions (FAQ)`_.
-Check there to see if your question(s) is already addressed.
+Cilium is a project  with a growing community. There are numerous ways to get
+help with Cilium if needed:
 
-The best way to get help if you get stuck is to contact us on the
-`Cilium Slack channel <https://cilium.herokuapp.com>`_.
+FAQ
+===
 
-If you are confident that you have found a bug, or if you have a feature
-request, please go ahead and create an issue on our
-`bug tracker <https://github.com/cilium/cilium/issues>`_.
+**Cilium Frequently Asked Questions (FAQ)**: Cilium uses `GitHub
+tags <https://github.com/cilium/cilium/issues?utf8=%E2%9C%93&q=label%3Akind%2Fquestion%20>`_
+to maintain a list of questions asked by users. We suggest checking to see if
+your question is already answered.
 
-If you are interested in contributing to the code or docs, ping us on
-`Slack <https://cilium.herokuapp.com>`_ or just dive in on
-`Github <https://github.com/cilium/cilium/>`_!
 
-.. _Cilium Frequently Asked Questions (FAQ): https://github.com/cilium/cilium/issues?utf8=%E2%9C%93&q=label%3Akind%2Fquestion%20
+.. _slack:
+
+Slack
+=====
+
+**Chat**: The best way to get immediate help if you get stuck is to ask in one
+of the `Cilium Slack channels <https://cilium.herokuapp.com>`_.
+
+GitHub
+======
+
+**Bug Tracker**: All the issues are addressed in the `GitHub issue tracker
+<https://github.com/cilium/cilium/issues>`_.  If you want to report a bug or a
+new feature please file the issue according to the `GitHub template
+<https://github.com/cilium/cilium/blob/master/.github/issue_template.md>`_.
+
+**Contributing**: If you want to contribute, reading the :ref:`dev_guide` should
+help you.
+
+Security Bugs
+=============
+
+**Security**: We strongly encourage you to report security vulnerabilities to
+our private security mailing list: security@cilium.io - first, before
+disclosing them in any public forums.
+
+This is a private mailing list where only members of the Cilium internal
+security team are subscribed to, and is treated as top priority.

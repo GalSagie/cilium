@@ -6,8 +6,13 @@ Manage services & loadbalancers
 
 ### Synopsis
 
-
 Manage services & loadbalancers
+
+### Options
+
+```
+  -h, --help   help for service
+```
 
 ### Options inherited from parent commands
 
@@ -18,9 +23,10 @@ Manage services & loadbalancers
 ```
 
 ### SEE ALSO
-* [cilium](cilium.html)	 - CLI
-* [cilium service delete](cilium_service_delete.html)	 - Delete a service
-* [cilium service get](cilium_service_get.html)	 - Display service information
-* [cilium service list](cilium_service_list.html)	 - List services
-* [cilium service update](cilium_service_update.html)	 - Update a service
+
+* [cilium](../cilium)	 - CLI
+* [cilium service delete](../cilium_service_delete)	 - Delete a service
+* [cilium service get](../cilium_service_get)	 - Display service information
+* [cilium service list](../cilium_service_list)	 - List services
+* [cilium service update](../cilium_service_update)	 - Update a service
 

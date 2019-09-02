@@ -17,10 +17,10 @@ package v2
 import (
 	goerrors "errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	k8sconst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
+	"github.com/cilium/cilium/pkg/option"
 
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -34,15 +34,6 @@ import (
 )
 
 const (
-	// CustomResourceDefinitionSingularName is the singular name of custom resource definition
-	CustomResourceDefinitionSingularName = "ciliumnetworkpolicy"
-
-	// CustomResourceDefinitionPluralName is the plural name of custom resource definition
-	CustomResourceDefinitionPluralName = "ciliumnetworkpolicies"
-
-	// CustomResourceDefinitionKind is the Kind name of custom resource definition
-	CustomResourceDefinitionKind = "CiliumNetworkPolicy"
-
 	// CustomResourceDefinitionGroup is the name of the third party resource group
 	CustomResourceDefinitionGroup = k8sconst.GroupName
 
@@ -51,10 +42,17 @@ const (
 
 	// CustomResourceDefinitionSchemaVersion is semver-conformant version of CRD schema
 	// Used to determine if CRD needs to be updated in cluster
-	CustomResourceDefinitionSchemaVersion = "1.3"
+	CustomResourceDefinitionSchemaVersion = "1.14"
 
 	// CustomResourceDefinitionSchemaVersionKey is key to label which holds the CRD schema version
 	CustomResourceDefinitionSchemaVersionKey = "io.cilium.k8s.crd.schema.version"
+
+	// CNPKindDefinition is the kind name for Cilium Network Policy
+	CNPKindDefinition = "CiliumNetworkPolicy"
+
+	fqdnNameRegex = `^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])\.?$`
+
+	fqdnPatternRegex = `^(([a-zA-Z0-9\*]|[a-zA-Z0-9\*][a-zA-Z0-9\-\*]*[a-zA-Z0-9\*])\.)*([A-Za-z0-9\*]|[A-Za-z0-9\*][A-Za-z0-9\-\*]*[A-Za-z0-9\*])\.?$`
 )
 
 // SchemeGroupVersion is group version used to register these objects
@@ -105,19 +103,64 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&CiliumNetworkPolicy{},
 		&CiliumNetworkPolicyList{},
+		&CiliumEndpoint{},
+		&CiliumEndpointList{},
+		&CiliumNode{},
+		&CiliumNodeList{},
+		&CiliumIdentity{},
+		&CiliumIdentityList{},
 	)
+
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
 }
 
-// CreateCustomResourceDefinitions creates the CRD object in the kubernetes
+// CreateCustomResourceDefinitions creates our CRD objects in the kubernetes
 // cluster
 func CreateCustomResourceDefinitions(clientset apiextensionsclient.Interface) error {
-	cnpCRDName := CustomResourceDefinitionPluralName + "." + SchemeGroupVersion.Group
+	if err := createCNPCRD(clientset); err != nil {
+		return err
+	}
+
+	if err := createCEPCRD(clientset); err != nil {
+		return err
+	}
+
+	if err := createNodeCRD(clientset); err != nil {
+		return err
+	}
+
+	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD {
+		if err := createIdentityCRD(clientset); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// createCNPCRD creates and updates the CiliumNetworkPolicies CRD. It should be called
+// on agent startup but is idempotent and safe to call again.
+func createCNPCRD(clientset apiextensionsclient.Interface) error {
+	var (
+		// CustomResourceDefinitionSingularName is the singular name of custom resource definition
+		CustomResourceDefinitionSingularName = "ciliumnetworkpolicy"
+
+		// CustomResourceDefinitionPluralName is the plural name of custom resource definition
+		CustomResourceDefinitionPluralName = "ciliumnetworkpolicies"
+
+		// CustomResourceDefinitionShortNames are the abbreviated names to refer to this CRD's instances
+		CustomResourceDefinitionShortNames = []string{"cnp", "ciliumnp"}
+
+		// CustomResourceDefinitionKind is the Kind name of custom resource definition
+		CustomResourceDefinitionKind = CNPKindDefinition
+
+		CRDName = CustomResourceDefinitionPluralName + "." + SchemeGroupVersion.Group
+	)
 
 	res := &apiextensionsv1beta1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: cnpCRDName,
+			Name: CRDName,
 			Labels: map[string]string{
 				CustomResourceDefinitionSchemaVersionKey: CustomResourceDefinitionSchemaVersion,
 			},
@@ -128,15 +171,174 @@ func CreateCustomResourceDefinitions(clientset apiextensionsclient.Interface) er
 			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
 				Plural:     CustomResourceDefinitionPluralName,
 				Singular:   CustomResourceDefinitionSingularName,
-				ShortNames: []string{"cnp", "ciliumnp"},
+				ShortNames: CustomResourceDefinitionShortNames,
 				Kind:       CustomResourceDefinitionKind,
 			},
+			Subresources: &apiextensionsv1beta1.CustomResourceSubresources{
+				Status: &apiextensionsv1beta1.CustomResourceSubresourceStatus{},
+			},
 			Scope:      apiextensionsv1beta1.NamespaceScoped,
-			Validation: &crv,
+			Validation: &cnpCRV,
 		},
 	}
 
 	return createUpdateCRD(clientset, "CiliumNetworkPolicy/v2", res)
+}
+
+// createCEPCRD creates and updates the CiliumEndpoint CRD. It should be called
+// on agent startup but is idempotent and safe to call again.
+func createCEPCRD(clientset apiextensionsclient.Interface) error {
+	var (
+		// CustomResourceDefinitionSingularName is the singular name of custom resource definition
+		CustomResourceDefinitionSingularName = "ciliumendpoint"
+
+		// CustomResourceDefinitionPluralName is the plural name of custom resource definition
+		CustomResourceDefinitionPluralName = "ciliumendpoints"
+
+		// CustomResourceDefinitionShortNames are the abbreviated names to refer to this CRD's instances
+		CustomResourceDefinitionShortNames = []string{"cep", "ciliumep"}
+
+		// CustomResourceDefinitionKind is the Kind name of custom resource definition
+		CustomResourceDefinitionKind = "CiliumEndpoint"
+
+		CRDName = CustomResourceDefinitionPluralName + "." + SchemeGroupVersion.Group
+	)
+
+	res := &apiextensionsv1beta1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: CRDName,
+		},
+		Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
+			Group:   SchemeGroupVersion.Group,
+			Version: SchemeGroupVersion.Version,
+			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
+				Plural:     CustomResourceDefinitionPluralName,
+				Singular:   CustomResourceDefinitionSingularName,
+				ShortNames: CustomResourceDefinitionShortNames,
+				Kind:       CustomResourceDefinitionKind,
+			},
+			AdditionalPrinterColumns: []apiextensionsv1beta1.CustomResourceColumnDefinition{
+				{
+					Name:        "Endpoint ID",
+					Type:        "integer",
+					Description: "Cilium endpoint id",
+					JSONPath:    ".status.id",
+				},
+				{
+					Name:        "Identity ID",
+					Type:        "integer",
+					Description: "Cilium identity id",
+					JSONPath:    ".status.identity.id",
+				},
+				{
+					Name:        "Ingress Enforcement",
+					Type:        "boolean",
+					Description: "Ingress enforcement in the endpoint",
+					JSONPath:    ".status.policy.ingress.enforcing",
+				},
+				{
+					Name:        "Egress Enforcement",
+					Type:        "boolean",
+					Description: "Egress enforcement in the endpoint",
+					JSONPath:    ".status.policy.egress.enforcing",
+				},
+				{
+					Name:        "Endpoint State",
+					Type:        "string",
+					Description: "Endpoint current state",
+					JSONPath:    ".status.state",
+				},
+				{
+					Name:        "IPv4",
+					Type:        "string",
+					Description: "Endpoint IPv4 address",
+					JSONPath:    ".status.networking.addressing[0].ipv4",
+				},
+				{
+					Name:        "IPv6",
+					Type:        "string",
+					Description: "Endpoint IPv6 address",
+					JSONPath:    ".status.networking.addressing[0].ipv6",
+				},
+			},
+			Subresources: &apiextensionsv1beta1.CustomResourceSubresources{
+				Status: &apiextensionsv1beta1.CustomResourceSubresourceStatus{},
+			},
+			Scope:      apiextensionsv1beta1.NamespaceScoped,
+			Validation: &cepCRV,
+		},
+	}
+
+	return createUpdateCRD(clientset, "v2.CiliumEndpoint", res)
+}
+
+// createNodeCRD creates and updates the CiliumNode CRD. It should be called on
+// agent startup but is idempotent and safe to call again.
+func createNodeCRD(clientset apiextensionsclient.Interface) error {
+	res := &apiextensionsv1beta1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ciliumnodes." + SchemeGroupVersion.Group,
+		},
+		Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
+			Group:   SchemeGroupVersion.Group,
+			Version: SchemeGroupVersion.Version,
+			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
+				Plural:     "ciliumnodes",
+				Singular:   "ciliumnode",
+				ShortNames: []string{"cn"},
+				Kind:       "CiliumNode",
+			},
+			Subresources: &apiextensionsv1beta1.CustomResourceSubresources{
+				Status: &apiextensionsv1beta1.CustomResourceSubresourceStatus{},
+			},
+			Scope: apiextensionsv1beta1.ClusterScoped,
+		},
+	}
+
+	return createUpdateCRD(clientset, "v2.CiliumNode", res)
+}
+
+// createIdentityCRD creates and updates the CiliumIdentity CRD. It should be
+// called on agent startup but is idempotent and safe to call again.
+func createIdentityCRD(clientset apiextensionsclient.Interface) error {
+
+	var (
+		// CustomResourceDefinitionSingularName is the singular name of custom resource definition
+		CustomResourceDefinitionSingularName = "ciliumidentity"
+
+		// CustomResourceDefinitionPluralName is the plural name of custom resource definition
+		CustomResourceDefinitionPluralName = "ciliumidentities"
+
+		// CustomResourceDefinitionShortNames are the abbreviated names to refer to this CRD's instances
+		CustomResourceDefinitionShortNames = []string{"ciliumid"}
+
+		// CustomResourceDefinitionKind is the Kind name of custom resource definition
+		CustomResourceDefinitionKind = "CiliumIdentity"
+
+		CRDName = CustomResourceDefinitionPluralName + "." + SchemeGroupVersion.Group
+	)
+
+	res := &apiextensionsv1beta1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: CRDName,
+		},
+		Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
+			Group:   SchemeGroupVersion.Group,
+			Version: SchemeGroupVersion.Version,
+			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
+				Plural:     CustomResourceDefinitionPluralName,
+				Singular:   CustomResourceDefinitionSingularName,
+				ShortNames: CustomResourceDefinitionShortNames,
+				Kind:       CustomResourceDefinitionKind,
+			},
+			Subresources: &apiextensionsv1beta1.CustomResourceSubresources{
+				Status: &apiextensionsv1beta1.CustomResourceSubresourceStatus{},
+			},
+			Scope: apiextensionsv1beta1.ClusterScoped,
+		},
+	}
+
+	return createUpdateCRD(clientset, "v2.CiliumIdentity", res)
 }
 
 // createUpdateCRD ensures the CRD object is installed into the k8s cluster. It
@@ -148,19 +350,19 @@ func createUpdateCRD(clientset apiextensionsclient.Interface, CRDName string, cr
 	if errors.IsNotFound(err) {
 		scopedLog.Info("Creating CRD (CustomResourceDefinition)...")
 		clusterCRD, err = clientset.ApiextensionsV1beta1().CustomResourceDefinitions().Create(crd)
+		// This occurs when multiple agents race to create the CRD. Since another has
+		// created it, it will also update it, hence the non-error return.
+		if errors.IsAlreadyExists(err) {
+			return nil
+		}
 	}
-	switch {
-	// This occurs when multiple agents race to create the CRD. Since another has
-	// created it, it will also update it, hence the non-error return.
-	case err != nil && errors.IsAlreadyExists(err):
-		return nil
-
-	case err != nil:
+	if err != nil {
 		return err
 	}
 
-	scopedLog.Info("Updating CRD (CustomResourceDefinition)...")
-	if needsUpdate(clusterCRD, err) {
+	scopedLog.Debug("Checking if CRD (CustomResourceDefinition) needs update...")
+	if needsUpdate(clusterCRD) {
+		scopedLog.Info("Updating CRD (CustomResourceDefinition)...")
 		// Update the CRD with the validation schema.
 		err = wait.Poll(500*time.Millisecond, 60*time.Second, func() (bool, error) {
 			clusterCRD, err = clientset.ApiextensionsV1beta1().
@@ -170,26 +372,31 @@ func createUpdateCRD(clientset apiextensionsclient.Interface, CRDName string, cr
 				return false, err
 			}
 
-			if clusterCRD.Spec.Validation == nil ||
-				!reflect.DeepEqual(clusterCRD.Spec.Validation.OpenAPIV3Schema, crv.OpenAPIV3Schema) {
-				clusterCRD.Spec.Validation = crd.Spec.Validation
+			// This seems too permissive but we only get here if the version is
+			// different per needsUpdate above. If so, we want to update on any
+			// validation change including adding or removing validation.
+			if needsUpdate(clusterCRD) {
 				scopedLog.Debug("CRD validation is different, updating it...")
+				clusterCRD.ObjectMeta.Labels = crd.ObjectMeta.Labels
+				clusterCRD.Spec = crd.Spec
 				_, err = clientset.ApiextensionsV1beta1().CustomResourceDefinitions().Update(clusterCRD)
 				if err == nil {
 					return true, nil
 				}
 				scopedLog.WithError(err).Debug("Unable to update CRD validation")
-				return false, nil
+				return false, err
 			}
 
 			return true, nil
 		})
 		if err != nil {
 			scopedLog.WithError(err).Error("Unable to update CRD")
+			return err
 		}
 	}
 
 	// wait for the CRD to be established
+	scopedLog.Debug("Waiting for CRD (CustomResourceDefinition) to be available...")
 	err = wait.Poll(500*time.Millisecond, 60*time.Second, func() (bool, error) {
 		crd, err := clientset.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crd.ObjectMeta.Name, metav1.GetOptions{})
 		if err != nil {
@@ -218,30 +425,25 @@ func createUpdateCRD(clientset apiextensionsclient.Interface, CRDName string, cr
 		return err
 	}
 
-	scopedLog.Info("Installed CRD (CustomResourceDefinition)")
-
+	scopedLog.Info("CRD (CustomResourceDefinition) is installed and up-to-date")
 	return nil
 }
 
-func needsUpdate(
-	clusterCRD *apiextensionsv1beta1.CustomResourceDefinition,
-	createError error) bool {
+func needsUpdate(clusterCRD *apiextensionsv1beta1.CustomResourceDefinition) bool {
 
-	if errors.IsAlreadyExists(createError) {
-		if clusterCRD.Spec.Validation == nil {
-			// no validation detected
-			return true
-		}
-		v, ok := clusterCRD.Labels[CustomResourceDefinitionSchemaVersionKey]
-		if !ok {
-			// no schema version detected
-			return true
-		}
-		clusterVersion, err := version.NewVersion(v)
-		if err != nil || clusterVersion.LessThan(comparableCRDSchemaVersion) {
-			// version in cluster is either unparsable or smaller than current version
-			return true
-		}
+	if clusterCRD.Spec.Validation == nil {
+		// no validation detected
+		return true
+	}
+	v, ok := clusterCRD.Labels[CustomResourceDefinitionSchemaVersionKey]
+	if !ok {
+		// no schema version detected
+		return true
+	}
+	clusterVersion, err := version.NewVersion(v)
+	if err != nil || clusterVersion.LessThan(comparableCRDSchemaVersion) {
+		// version in cluster is either unparsable or smaller than current version
+		return true
 	}
 	return false
 }
@@ -255,16 +457,15 @@ func getInt64(i int64) *int64 {
 }
 
 var (
-	crv = apiextensionsv1beta1.CustomResourceValidation{
+	// cepCRV is a minimal validation for CEP objects. Since only the agent is
+	// creating them, it is better to be permissive and have some data, if buggy,
+	// than to have no data in k8s.
+	cepCRV = apiextensionsv1beta1.CustomResourceValidation{
+		OpenAPIV3Schema: &apiextensionsv1beta1.JSONSchemaProps{},
+	}
+
+	cnpCRV = apiextensionsv1beta1.CustomResourceValidation{
 		OpenAPIV3Schema: &apiextensionsv1beta1.JSONSchemaProps{
-			OneOf: []apiextensionsv1beta1.JSONSchemaProps{
-				{
-					Required: []string{"spec"},
-				},
-				{
-					Required: []string{"specs"},
-				},
-			},
 			Properties: properties,
 		},
 	}
@@ -284,6 +485,7 @@ var (
 		"PortRule":                 PortRule,
 		"PortRuleHTTP":             PortRuleHTTP,
 		"PortRuleKafka":            PortRuleKafka,
+		"PortRuleL7":               PortRuleL7,
 		"Rule":                     Rule,
 		"Service":                  Service,
 		"ServiceSelector":          ServiceSelector,
@@ -301,25 +503,19 @@ var (
 				Pattern: `^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4]` +
 					`[0-9]|[01]?[0-9][0-9]?)\/([0-9]|[1-2][0-9]|3[0-2])$`,
 			},
-			//{
-			//	// IPv6 CIDR
-			//	Type: "string",
-			//	Pattern: `^s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]` +
-			//		`{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|` +
-			//		`2[0-4]d|1dd|[1-9]?d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4})` +
-			//		`{1,2})|:((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|2[0-4]d|1dd|[1-9]?d)){3})` +
-			//		`|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]` +
-			//		`{1,4})?:((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|2[0-4]d|1dd|[1-9]?d)){3}` +
-			//		`))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]` +
-			//		`{1,4}){0,2}:((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|2[0-4]d|1dd|[1-9]?d))` +
-			//		`{3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:` +
-			//		`[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|2[0-4]d|` +
-			//		`1dd|[1-9]?d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|` +
-			//		`((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|2[0-4]d` +
-			//		`|1dd|[1-9]?d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4})` +
-			//		`{0,5}:((25[0-5]|2[0-4]d|1dd|[1-9]?d)(.(25[0-5]|2[0-4]d|1dd|[1-9]?d)){3}))|` +
-			//		`:)))(%.+)?s*/([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$`,
-			//},
+			{
+				// IPv6 CIDR
+				Type: "string",
+				Pattern: `^s*((([0-9A-Fa-f]{1,4}:){7}(:|([0-9A-Fa-f]{1,4})))` +
+					`|(([0-9A-Fa-f]{1,4}:){6}:([0-9A-Fa-f]{1,4})?)` +
+					`|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){0,1}):([0-9A-Fa-f]{1,4})?))` +
+					`|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){0,2}):([0-9A-Fa-f]{1,4})?))` +
+					`|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){0,3}):([0-9A-Fa-f]{1,4})?))` +
+					`|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){0,4}):([0-9A-Fa-f]{1,4})?))` +
+					`|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){0,5}):([0-9A-Fa-f]{1,4})?))` +
+					`|(:(:|((:[0-9A-Fa-f]{1,4}){1,7}))))` +
+					`(%.+)?s*/([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$`,
+			},
 		},
 	}
 
@@ -388,7 +584,7 @@ var (
 			"toEntities": {
 				Description: "ToEntities is a list of special entities to which the endpoint " +
 					"subject to the rule is allowed to initiate connections. Supported " +
-					"entities are `world` and `host`",
+					"entities are `world`, `cluster` and `host`",
 				Type: "array",
 				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
 					Schema: &apiextensionsv1beta1.JSONSchemaProps{
@@ -416,10 +612,90 @@ var (
 					Schema: &Service,
 				},
 			},
+			"toEndpoints": {
+				Description: "ToEndpoints is a list of endpoints identified by an " +
+					"EndpointSelector to which the endpoint subject to the rule" +
+					"is allowed to communicate.\n\nExample: Any endpoint with the label " +
+					"\"role=frontend\" can be consumed by any endpoint carrying the label " +
+					"\"role=backend\".",
+				Type: "array",
+				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
+					Schema: &EndpointSelector,
+				},
+			},
+			"toRequires": {
+				Description: "ToRequires is a list of additional constraints which must be " +
+					"met in order for the selected endpoints to be able to reach other " +
+					"endpoints. These additional constraints do not by themselves grant access " +
+					"privileges and must always be accompanied with at least one matching " +
+					"FromEndpoints.\n\nExample: Any Endpoint with the label \"team=A\" " +
+					"requires any endpoint to which it communicates to also carry the label " +
+					"\"team=A\".",
+				Type: "array",
+				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
+					Schema: &EndpointSelector,
+				},
+			},
+			"toGroups": {
+				Description: `ToGroups is a list of constraints that will
+				gather data from third-party providers and create a new
+				derived policy.`,
+				Properties: map[string]apiextensionsv1beta1.JSONSchemaProps{
+					"AWS": AWSGroup,
+				},
+			},
+			"toFQDNs": {
+				Description: `ToFQDNs is a list of rules matching fqdns that endpoint
+				is allowed to communicate with`,
+				Type: "array",
+				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
+					Schema: &FQDNRule,
+				},
+			},
 		},
 	}
 
-	EndpointSelector = LabelSelector
+	FQDNRule = apiextensionsv1beta1.JSONSchemaProps{
+		Description: `FQDNRule is a rule that specifies an fully qualified domain name to which outside communication is allowed`,
+		Properties: map[string]apiextensionsv1beta1.JSONSchemaProps{
+			"matchName":    MatchFQDNName,
+			"matchPattern": MatchFQDNPattern,
+		},
+	}
+
+	MatchFQDNName = apiextensionsv1beta1.JSONSchemaProps{
+		Description: `MatchName matches fqdn name`,
+		Type:        "string",
+		Pattern:     fqdnNameRegex,
+	}
+
+	MatchFQDNPattern = apiextensionsv1beta1.JSONSchemaProps{
+		Description: `MatchPattern matches fqdn by pattern`,
+		Type:        "string",
+		Pattern:     fqdnPatternRegex,
+	}
+
+	AWSGroup = apiextensionsv1beta1.JSONSchemaProps{
+		Description: "",
+		Properties: map[string]apiextensionsv1beta1.JSONSchemaProps{
+			"SecurityGroupsIds": {
+				Description: `SecurityGroupsIds is the list of AWS security
+				group IDs that will filter the instances IPs from the AWS API`,
+				Type: "array",
+			},
+			"SecurityGroupsNames": {
+				Description: `SecurityGroupsNames is the list of  AWS security
+				group names that will filter the instances IPs from the AWS API`,
+				Type: "array",
+			},
+			"Region": {
+				Description: `Region is the key that will filter the AWS EC2
+				instances in the given region`,
+				Type: "string",
+			},
+		},
+	}
+	EndpointSelector = *LabelSelector.DeepCopy()
 
 	IngressRule = apiextensionsv1beta1.JSONSchemaProps{
 		Description: "IngressRule contains all rule types which can be applied at ingress, " +
@@ -479,7 +755,7 @@ var (
 			"fromEntities": {
 				Description: "FromEntities is a list of special entities which the endpoint " +
 					"subject to the rule is allowed to receive connections from. Supported " +
-					"entities are `world` and `host`",
+					"entities are `world`, `cluster`, `host`, and `init`",
 				Type: "array",
 				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
 					Schema: &apiextensionsv1beta1.JSONSchemaProps{
@@ -544,6 +820,32 @@ var (
 					Schema: &PortRuleKafka,
 				},
 			},
+			"l7proto": {
+				Description: "Parser type name that uses Key-Value pair rules.",
+				Type:        "string",
+			},
+			"l7": {
+				Description: "Generic Key-Value pair rules.",
+				Type:        "array",
+				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
+					Schema: &PortRuleL7,
+				},
+			},
+			"dns": {
+				Description: "DNS specific rules",
+				Type:        "array",
+				Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
+					Schema: &PortRuleDNS,
+				},
+			},
+		},
+	}
+
+	PortRuleDNS = apiextensionsv1beta1.JSONSchemaProps{
+		Description: `FQDNRule is a rule that specifies an fully qualified domain name to which outside communication is allowed`,
+		Properties: map[string]apiextensionsv1beta1.JSONSchemaProps{
+			"matchName":    MatchFQDNName,
+			"matchPattern": MatchFQDNPattern,
 		},
 	}
 
@@ -741,6 +1043,27 @@ var (
 			"optional, if all fields are empty or missing, the rule will match all Kafka " +
 			"messages.",
 		Properties: map[string]apiextensionsv1beta1.JSONSchemaProps{
+			"role": {
+				Description: "Role is a case-insensitive string and describes a group of API keys" +
+					"necessary to perform certain higher level Kafka operations such as" +
+					"\"produce\" or \"consume\". An APIGroup automatically expands into all APIKeys" +
+					"required to perform the specified higher level operation." +
+					"The following values are supported:" +
+					"- \"produce\": Allow producing to the topics specified in the rule" +
+					"- \"consume\": Allow consuming from the topics specified in the rule" +
+					"This field is incompatible with the APIKey field, either APIKey or Role" +
+					"may be specified. If omitted or empty, the field has no effect and the " +
+					"logic of the APIKey field applies.",
+				Type: "string",
+				Enum: []apiextensionsv1beta1.JSON{
+					{
+						Raw: []byte(`"produce"`),
+					},
+					{
+						Raw: []byte(`"consume"`),
+					},
+				},
+			},
 			"apiKey": {
 				Description: "APIKey is a case-insensitive string matched against the key of " +
 					"a request, e.g. \"produce\", \"fetch\", \"createtopic\", \"deletetopic\", " +
@@ -780,6 +1103,26 @@ var (
 				MaxLength: getInt64(255),
 			},
 		},
+	}
+
+	PortRuleL7 = apiextensionsv1beta1.JSONSchemaProps{
+		Description: "PortRuleL7 is a map of {key,value} pairs which is passed to the " +
+			"parser referenced in l7proto. It is up to the parser to define what to " +
+			"do with the map data. If omitted or empty, all requests are allowed. " +
+			"Both keys and values must be strings.",
+		//
+		// AdditionalProperties is supported by k8s 1.11 and later only
+		// Without it non-string value types are accepted which may cause policy translation
+		// in cilium-agent to fail.
+		//
+		// Keep this here so that we can re-introduce this when th minimum suppoerted k8s version
+		// is 1.11.
+		//
+		//AdditionalProperties: &apiextensionsv1beta1.JSONSchemaPropsOrBool{
+		//	Schema: &apiextensionsv1beta1.JSONSchemaProps{
+		//		Type: "string",
+		//	},
+		//},
 	}
 
 	Rule = apiextensionsv1beta1.JSONSchemaProps{
@@ -852,13 +1195,13 @@ var (
 		},
 	}
 
-	spec = Rule
+	spec = *Rule.DeepCopy()
 
 	specs = apiextensionsv1beta1.JSONSchemaProps{
 		Description: "Specs is a list of desired Cilium specific rule specification.",
 		Type:        "array",
 		Items: &apiextensionsv1beta1.JSONSchemaPropsOrArray{
-			Schema: &Rule,
+			Schema: &spec,
 		},
 	}
 )

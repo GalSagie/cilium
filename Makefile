@@ -1,139 +1,223 @@
 include Makefile.defs
 include daemon/bpf.sha
 
-SUBDIRS = envoy plugins bpf cilium daemon monitor cilium-health bugtool
-GOFILES ?= $(shell go list ./... | grep -v /vendor/ | grep -v /contrib/ | grep -v envoy.*api)
-TESTPKGS ?=  $(shell go list ./... | grep -v /vendor/ | grep -v /contrib/ | grep -v envoy.*api | grep -v test)
-GOLANGVERSION = $(shell go version 2>/dev/null | grep -Eo '(go[0-9].[0-9])')
-GOLANG_SRCFILES=$(shell for pkg in $(subst github.com/cilium/cilium/,,$(GOFILES)); do find $$pkg -name *.go -print; done | grep -v vendor)
-BPF_FILES ?= $(shell git ls-files ../bpf/ | tr "\n" ' ')
-BPF_SRCFILES=$(subst ../,,$(BPF_FILES))
+SUBDIRS_CILIUM_CONTAINER := proxylib envoy plugins/cilium-cni bpf cilium daemon cilium-health bugtool
+ifdef LIBNETWORK_PLUGIN
+SUBDIRS_CILIUM_CONTAINER += plugins/cilium-docker
+endif
+SUBDIRS := $(SUBDIRS_CILIUM_CONTAINER) operator plugins tools
+GOFILES_EVAL := $(subst _$(ROOT_DIR)/,,$(shell $(CGO_DISABLED) $(GO) list ./... | grep -v -e /vendor/ -e /contrib/))
+GOFILES ?= $(GOFILES_EVAL)
+TESTPKGS_EVAL := $(subst github.com/cilium/cilium/,,$(shell $(CGO_DISABLED) $(GO) list ./... | grep -v '/api/v1\|/vendor\|/contrib' | grep -v -P 'test(?!/helpers/logutils)'))
+TESTPKGS ?= $(TESTPKGS_EVAL)
+GOLANGVERSION := $(shell $(GO) version 2>/dev/null | grep -Eo '(go[0-9].[0-9])')
+GOLANG_SRCFILES := $(shell for pkg in $(subst github.com/cilium/cilium/,,$(GOFILES)); do find $$pkg -name *.go -print; done | grep -v vendor | sort | uniq)
+BPF_FILES_EVAL := $(shell git ls-files $(ROOT_DIR)/bpf/ | grep -v .gitignore | tr "\n" ' ')
+BPF_FILES ?= $(BPF_FILES_EVAL)
+BPF_SRCFILES := $(subst ../,,$(BPF_FILES))
 
-GOTEST_OPTS = -test.v -check.v
+SWAGGER_VERSION := v0.19.0
+SWAGGER := $(CONTAINER_ENGINE_FULL) run --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR) -e GOPATH=$(GOPATH) --entrypoint swagger quay.io/goswagger/swagger:$(SWAGGER_VERSION)
+
+COVERPKG_EVAL := $(shell if [ $$(echo "$(TESTPKGS)" | wc -w) -gt 1 ]; then echo "./..."; else echo "$(TESTPKGS)"; fi)
+COVERPKG ?= $(COVERPKG_EVAL)
+GOTEST_BASE := -test.v -timeout 360s
+GOTEST_UNIT_BASE := $(GOTEST_BASE) -check.vv
+GOTEST_PRIV_OPTS := $(GOTEST_UNIT_BASE) -tags=privileged_tests
+GOTEST_COVER_OPTS := -coverprofile=coverage.out -covermode=count -coverpkg $(COVERPKG)
+BENCH_EVAL := "."
+BENCH ?= $(BENCH_EVAL)
+BENCHFLAGS_EVAL := -bench=$(BENCH) -run=^$ -benchtime=10s
+BENCHFLAGS ?= $(BENCHFLAGS_EVAL)
+# Level of logs emitted to console during unit test runs
+LOGLEVEL ?= "error"
+SKIP_VET ?= "false"
+SKIP_KVSTORES ?= "false"
+
+JOB_BASE_NAME ?= cilium_test
 
 UTC_DATE=$(shell date -u "+%Y-%m-%d")
 
-all: precheck-gofmt build postcheck
+GO_VERSION := 1.12.8
+
+# Since there's a bug with NFS or the kernel, the flock syscall hangs the documentation
+# build in the developer VM. For this reason the documentation build is skipped if NFS
+# is running in the developer VM.
+SKIP_DOCS ?= $(shell if mount | grep -q "/home/vagrant/go/src/github.com/cilium/cilium type nfs"; then echo "true"; else echo "false"; fi)
+
+TEST_LDFLAGS=-ldflags "-X github.com/cilium/cilium/pkg/kvstore.consulDummyAddress=https://consul:8443 \
+	-X github.com/cilium/cilium/pkg/kvstore.etcdDummyAddress=http://etcd:4002 \
+	-X github.com/cilium/cilium/pkg/testutils.CiliumRootDir=$(ROOT_DIR) \
+	-X github.com/cilium/cilium/pkg/datapath.DatapathSHA=1234567890abcdef7890"
+
+TEST_UNITTEST_LDFLAGS= -ldflags "-X github.com/cilium/cilium/pkg/kvstore.consulDummyConfigFile=/tmp/cilium-consul-certs/cilium-consul.yaml \
+	-X github.com/cilium/cilium/pkg/testutils.CiliumRootDir=$(ROOT_DIR) \
+	-X github.com/cilium/cilium/pkg/datapath.DatapathSHA=1234567890abcdef7890 \
+	-X github.com/cilium/cilium/pkg/logging.DefaultLogLevelStr=$(LOGLEVEL)"
+
+all: precheck build postcheck
 	@echo "Build finished."
 
 build: $(SUBDIRS)
 
+build-container:
+	for i in $(SUBDIRS_CILIUM_CONTAINER); do $(MAKE) -C $$i all; done
+
 $(SUBDIRS): force
 	@ $(MAKE) -C $@ all
 
-# invoked from ginkgo Jenkinsfile
-tests-ginkgo: force
-	go vet $(GOFILES)
-	# Make the bindata to run the unittest
-	make -C daemon go-bindata
-	docker-compose -f test/docker-compose.yml -p $$JOB_BASE_NAME-$$BUILD_NUMBER run --rm test
-	# Remove the networks
-	docker-compose -f test/docker-compose.yml -p $$JOB_BASE_NAME-$$BUILD_NUMBER down
+jenkins-precheck:
+	docker-compose -f test/docker-compose.yml -p $(JOB_BASE_NAME)-$$BUILD_NUMBER run --rm precheck
 
-clean-ginkgo-tests:
-	docker-compose -f test/docker-compose.yml -p $$JOB_BASE_NAME-$$BUILD_NUMBER down
-	docker-compose -f test/docker-compose.yml -p $$JOB_BASE_NAME-$$BUILD_NUMBER rm
+clean-jenkins-precheck:
+	docker-compose -f test/docker-compose.yml -p $(JOB_BASE_NAME)-$$BUILD_NUMBER rm
+	# remove the networks
+	docker-compose -f test/docker-compose.yml -p $(JOB_BASE_NAME)-$$BUILD_NUMBER down
 
-TEST_LDFLAGS=-ldflags "-X github.com/cilium/cilium/pkg/kvstore.consulDummyAddress=consul:8500 -X github.com/cilium/cilium/pkg/kvstore.etcdDummyAddress=etcd:4002"
-
-# invoked from ginkgo compose file after starting kvstore backends
-tests-ginkgo-real:
-	echo "mode: count" > coverage-all.out
-	echo "mode: count" > coverage.out
-	$(foreach pkg,$(TESTPKGS),\
-	go test $(TEST_LDFLAGS) \
-            -timeout 360s -coverprofile=coverage.out -covermode=count $(pkg) $(GOTEST_OPTS) || exit 1;\
-            tail -n +2 coverage.out >> coverage-all.out;)
-	go tool cover -html=coverage-all.out -o=coverage-all.html
-	rm coverage-all.out
-	rm coverage.out
-	@rmdir ./daemon/1 ./daemon/1_backup 2> /dev/null || true
-
-tests-envoy:
-	@ $(MAKE) -C envoy tests
+PRIV_TEST_PKGS_EVAL := $(shell for pkg in $(TESTPKGS); do echo $(pkg); done | xargs grep --include='*.go' -ril '+build privileged_tests' | xargs dirname | sort | uniq)
+PRIV_TEST_PKGS ?= $(PRIV_TEST_PKGS_EVAL)
+tests-privileged:
+	# cilium-map-migrate is a dependency of some unit tests.
+	$(MAKE) -C bpf cilium-map-migrate
+	$(QUIET)$(foreach pkg,$(PRIV_TEST_PKGS),\
+		$(GO) test $(TEST_LDFLAGS) github.com/cilium/cilium/$(pkg) $(GOTEST_PRIV_OPTS) || exit 1;)
 
 start-kvstores:
-	@docker rm -f "cilium-etcd-test-container" 2> /dev/null || true
-	-docker run -d \
-	    --name "cilium-etcd-test-container" \
-	    -p 4002:4001 \
-        quay.io/coreos/etcd:v3.1.0 \
-        etcd -name etcd0 \
-        -advertise-client-urls http://0.0.0.0:4001 \
-        -listen-client-urls http://0.0.0.0:4001 \
-        -initial-cluster-token etcd-cluster-1 \
-        -initial-cluster-state new
-	@docker rm -f "cilium-consul-test-container" 2> /dev/null || true
-	-docker run -d \
-           --name "cilium-consul-test-container" \
-           -p 8501:8500 \
-           -e 'CONSUL_LOCAL_CONFIG={"skip_leave_on_interrupt": true, "disable_update_check": true}' \
-           consul:0.8.3 \
-           agent -client=0.0.0.0 -server -bootstrap-expect 1
+ifeq ($(SKIP_KVSTORES),"false")
+	@echo Starting key-value store containers...
+	-$(CONTAINER_ENGINE_FULL) rm -f "cilium-etcd-test-container" 2> /dev/null
+	$(CONTAINER_ENGINE_FULL) run -d \
+		--name "cilium-etcd-test-container" \
+		-p 4002:4001 \
+		quay.io/coreos/etcd:v3.2.17 \
+		etcd -name etcd0 \
+		-advertise-client-urls http://0.0.0.0:4001 \
+		-listen-client-urls http://0.0.0.0:4001 \
+		-listen-peer-urls http://0.0.0.0:2380 \
+		-initial-cluster-token etcd-cluster-1 \
+		-initial-cluster-state new
+	-$(CONTAINER_ENGINE_FULL) rm -f "cilium-consul-test-container" 2> /dev/null
+	rm -rf /tmp/cilium-consul-certs
+	mkdir /tmp/cilium-consul-certs
+	cp $(CURDIR)/test/consul/* /tmp/cilium-consul-certs
+	chmod -R a+rX /tmp/cilium-consul-certs
+	$(CONTAINER_ENGINE_FULL) run -d \
+		--name "cilium-consul-test-container" \
+		-p 8501:8443 \
+		-e 'CONSUL_LOCAL_CONFIG={"skip_leave_on_interrupt": true, "disable_update_check": true}' \
+		-v /tmp/cilium-consul-certs:/cilium-consul/ \
+		consul:1.1.0 \
+		agent -client=0.0.0.0 -server -bootstrap-expect 1 -config-file=/cilium-consul/consul-config.json
+endif
+
+stop-kvstores:
+ifeq ($(SKIP_KVSTORES),"false")
+	$(CONTAINER_ENGINE_FULL) rm -f "cilium-etcd-test-container"
+	$(CONTAINER_ENGINE_FULL) rm -f "cilium-consul-test-container"
+	rm -rf /tmp/cilium-consul-certs
+endif
 
 tests: force
-	$(MAKE) unit-tests tests-envoy
+	$(MAKE) unit-tests
+
+generate-cov:
+	# Remove generated code from coverage
+	$(QUIET) grep -Ev '(^github.com/cilium/cilium/api/v1)|(generated.deepcopy.go)|(^github.com/cilium/cilium/pkg/k8s/client/)' \
+		coverage-all-tmp.out > coverage-all.out
+	$(QUIET)$(GO) tool cover -html=coverage-all.out -o=coverage-all.html
+	$(QUIET) rm coverage.out coverage-all-tmp.out
 
 unit-tests: start-kvstores
-	go vet $(GOFILES)
-	echo "mode: count" > coverage-all.out
-	echo "mode: count" > coverage.out
-	$(foreach pkg,$(TESTPKGS),\
-	go test \
-            -timeout 360s -coverprofile=coverage.out -covermode=count $(pkg) $(GOTEST_OPTS) || exit 1;\
-            tail -n +2 coverage.out >> coverage-all.out;)
-	go tool cover -html=coverage-all.out -o=coverage-all.html
-	rm coverage-all.out
-	rm coverage.out
+	$(QUIET) $(MAKE) -C test/bpf/
+	test/bpf/unit-test
+	$(QUIET) $(MAKE) -C daemon/ check-bindata
+ifeq ($(SKIP_VET),"false")
+	$(MAKE) govet
+endif
+	$(QUIET) echo "mode: count" > coverage-all-tmp.out
+	$(QUIET) echo "mode: count" > coverage.out
+	$(QUIET)$(foreach pkg,$(patsubst %,github.com/cilium/cilium/%,$(TESTPKGS)),\
+		$(GO) test $(TEST_UNITTEST_LDFLAGS) $(pkg) $(GOTEST_BASE) $(GOTEST_COVER_OPTS) || exit 1; \
+		tail -n +2 coverage.out >> coverage-all-tmp.out;)
+	$(MAKE) generate-cov
 	@rmdir ./daemon/1 ./daemon/1_backup 2> /dev/null || true
-	docker rm -f "cilium-etcd-test-container"
-	docker rm -f "cilium-consul-test-container"
+	$(MAKE) stop-kvstores
+
+bench: start-kvstores
+	$(QUIET)$(foreach pkg,$(patsubst %,github.com/cilium/cilium/%,$(TESTPKGS)),\
+		$(GO) test $(TEST_UNITTEST_LDFLAGS) $(GOTEST_BASE) $(BENCHFLAGS) \
+			$(pkg) \
+		|| exit 1;)
+	$(MAKE) stop-kvstores
+
+bench-privileged:
+	$(QUIET)$(foreach pkg,$(patsubst %,github.com/cilium/cilium/%,$(TESTPKGS)),\
+		$(GO) test $(TEST_UNITTEST_LDFLAGS) $(GOTEST_BASE) $(BENCHFLAGS) \
+			-tags=privileged_tests $(pkg) \
+		|| exit 1;)
 
 clean-tags:
-	-rm -f cscope.out cscope.in.out cscope.po.out cscope.files tags
+	@$(ECHO_CLEAN) tags
+	@-rm -f cscope.out cscope.in.out cscope.po.out cscope.files tags
 
-tags: $(GOLANG_SRCFILES) $(BPF_SRCFILES)
+tags: $(GOLANG_SRCFILES) $(BPF_SRCFILES) cscope.files
 	ctags $(GOLANG_SRCFILES) $(BPF_SRCFILES)
 	@ echo $(GOLANG_SRCFILES) $(BPF_SRCFILES) | sed 's/ /\n/g' | sort > cscope.files
 	cscope -R -b -q
 
 clean-container:
 	-for i in $(SUBDIRS); do $(MAKE) -C $$i clean; done
-	-for i in $(SUBDIRSLIB); do $(MAKE) -C $$i clean; done
 
 clean: clean-container
 	-$(MAKE) -C ./contrib/packaging/deb clean
 	-$(MAKE) -C ./contrib/packaging/rpm clean
-	-rm GIT_VERSION
+	-rm -f GIT_VERSION
 
 install:
 	$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	for i in $(SUBDIRS); do $(MAKE) -C $$i install; done
-	for i in $(SUBDIRSLIB); do $(MAKE) -C $$i install; done
+
+install-container:
+	$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	for i in $(SUBDIRS_CILIUM_CONTAINER); do $(MAKE) -C $$i install; done
 
 # Workaround for not having git in the build environment
 GIT_VERSION: .git
 	echo "$(GIT_VERSION)" >GIT_VERSION
 
-envoy/SOURCE_VERSION: .git
-	git rev-parse HEAD >envoy/SOURCE_VERSION
+docker-image: clean docker-image-no-clean docker-operator-image
 
-docker-image: clean GIT_VERSION envoy/SOURCE_VERSION
-	grep -v -E "(SOURCE|GIT)_VERSION" .gitignore >.dockerignore
-	echo ".*" >>.dockerignore # .git pruned out
-	echo "Documentation" >>.dockerignore # Not needed
-	docker build -t "cilium/cilium:$(DOCKER_IMAGE_TAG)" .
-	echo -e "Push like this when ready:\ndocker push cilium/cilium:$(DOCKER_IMAGE_TAG)"
+docker-image-no-clean: GIT_VERSION
+	$(CONTAINER_ENGINE_FULL) build \
+		--build-arg LOCKDEBUG=${LOCKDEBUG} \
+		--build-arg V=${V} \
+		--build-arg LIBNETWORK_PLUGIN=${LIBNETWORK_PLUGIN} \
+		-t "cilium/cilium:$(DOCKER_IMAGE_TAG)" .
+	$(QUIET)echo "Push like this when ready:"
+	$(QUIET)echo "${CONTAINER_ENGINE} push cilium/cilium:$(DOCKER_IMAGE_TAG)"
+
+dev-docker-image: GIT_VERSION
+	$(CONTAINER_ENGINE_FULL) build \
+		--build-arg LOCKDEBUG=${LOCKDEBUG} \
+		--build-arg V=${V} \
+		--build-arg LIBNETWORK_PLUGIN=${LIBNETWORK_PLUGIN} \
+		-t "cilium/cilium-dev:$(DOCKER_IMAGE_TAG)" .
+	$(QUIET)echo "Push like this when ready:"
+	$(QUIET)echo "${CONTAINER_ENGINE} push cilium/cilium-dev:$(DOCKER_IMAGE_TAG)"
+
+docker-operator-image: GIT_VERSION
+	$(CONTAINER_ENGINE_FULL) build --build-arg LOCKDEBUG=${LOCKDEBUG} -f cilium-operator.Dockerfile -t "cilium/operator:$(DOCKER_IMAGE_TAG)" .
+	$(QUIET)echo "Push like this when ready:"
+	$(QUIET)echo "docker push cilium/operator:$(DOCKER_IMAGE_TAG)"
+
+docker-image-init:
+	$(QUIET)cd contrib/packaging/docker && ${CONTAINER_ENGINE} build -t "cilium/cilium-init:$(UTC_DATE)" -f Dockerfile.init .
 
 docker-image-runtime:
-	cd contrib/packaging/docker && docker build -t "cilium/cilium-runtime:$(UTC_DATE)" -f Dockerfile.runtime .
-	echo -e "Update Dockerfile with the new tag and push like this when ready:\ndocker push cilium/cilium-runtime:$(UTC_DATE)"
+	cd contrib/packaging/docker && ${CONTAINER_ENGINE} build -t "cilium/cilium-runtime:$(UTC_DATE)" -f Dockerfile.runtime .
 
 docker-image-builder:
-	cp contrib/packaging/docker/Dockerfile.builder envoy/.
-	cd envoy && docker build -t "cilium/cilium-builder:$(UTC_DATE)" -f Dockerfile.builder .
-	rm envoy/Dockerfile.builder
-	echo -e "Update Dockerfile with the new tag and push like this when ready:\ndocker push cilium/cilium-builder:$(UTC_DATE)"
+	${CONTAINER_ENGINE_FULL} build -t "cilium/cilium-builder:$(UTC_DATE)" -f Dockerfile.builder .
 
 build-deb:
 	$(MAKE) -C ./contrib/packaging/deb
@@ -147,35 +231,134 @@ runtime-tests:
 k8s-tests:
 	$(MAKE) -C tests k8s-tests
 
-generate-api:
-	swagger generate server -t api/v1 -f api/v1/openapi.yaml -a restapi \
-	    -s server --default-scheme=unix -C api/v1/cilium-server.yml
-	swagger generate client -t api/v1 -f api/v1/openapi.yaml -a restapi
+generate-api: api/v1/openapi.yaml
+	@$(ECHO_GEN)api/v1/openapi.yaml
+	-$(SWAGGER) generate server -s server -a restapi \
+		-t api/v1 -f api/v1/openapi.yaml --default-scheme=unix -C api/v1/cilium-server.yml
+	-$(SWAGGER) generate client -a restapi \
+		-t api/v1 -f api/v1/openapi.yaml
 
-generate-health-api:
-	swagger generate server -t api/v1 -f api/v1/health/openapi.yaml \
-	    -a restapi -t api/v1/health/ -s server
-	swagger generate client -t api/v1 -f api/v1/health/openapi.yaml \
-	    -a restapi -t api/v1/health/
+generate-health-api: api/v1/health/openapi.yaml
+	@$(ECHO_GEN)api/v1/health/openapi.yaml
+	-$(SWAGGER) generate server -s server -a restapi \
+		-t api/v1 -t api/v1/health/ -f api/v1/health/openapi.yaml --default-scheme=unix -C api/v1/cilium-server.yml
+	-$(SWAGGER) generate client -a restapi \
+		-t api/v1 -t api/v1/health/ -f api/v1/health/openapi.yaml
 
 generate-k8s-api:
-	cd "$(GOPATH)/src/k8s.io/code-generator" && \
+	cd "./vendor/k8s.io/code-generator" && \
 	./generate-groups.sh all \
 	    github.com/cilium/cilium/pkg/k8s/client \
 	    github.com/cilium/cilium/pkg/k8s/apis \
-	    "cilium.io:v1,v2" \
+	    "cilium.io:v2" \
 	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
-	cd "$(GOPATH)/src/k8s.io/code-generator" && \
+	cd "./vendor/k8s.io/code-generator" && \
 	./generate-groups.sh deepcopy \
 	    github.com/cilium/cilium/pkg/k8s/client \
 	    github.com/cilium/cilium/pkg \
 	    "policy:api" \
 	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
-	cd "$(GOPATH)/src/k8s.io/code-generator" && \
+	cd "./vendor/k8s.io/code-generator" && \
 	./generate-groups.sh deepcopy \
 	    github.com/cilium/cilium/pkg/k8s/client \
 	    github.com/cilium/cilium \
-	    "pkg:labels" \
+	    "pkg:node" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium \
+	    "pkg:service" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/api \
+	    "v1:models" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "k8s:types" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:policymap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:ipcache" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:lxcmap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:tunnel" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:encrypt" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:metricsmap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:nat" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:lbmap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:eppolicymap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:sockmap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium/pkg \
+	    "maps:ctmap" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium \
+	    "pkg:tuple" \
+	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
+	cd "./vendor/k8s.io/code-generator" && \
+	./generate-groups.sh deepcopy \
+	    github.com/cilium/cilium/pkg/k8s/client \
+	    github.com/cilium/cilium \
+	    "pkg:bpf" \
 	    --go-header-file "$(PWD)/hack/custom-boilerplate.go.txt"
 
 vps:
@@ -200,10 +383,70 @@ release:
 	git archive --format tar $(BRANCH) | gzip > ../cilium_$(VERSION).orig.tar.gz
 
 gofmt:
-	for pkg in $(GOFILES); do go fmt $$pkg; done
+	$(QUIET)for pkg in $(GOFILES); do $(GO) fmt $$pkg; done
 
-precheck-gofmt:
-	contrib/scripts/check-fmt.sh
+govet:
+	@$(ECHO_CHECK) vetting all GOFILES...
+	$(QUIET)$(GO) vet \
+    ./api/... \
+    ./bugtool/... \
+    ./cilium/... \
+    ./cilium-health/... \
+    ./common/... \
+    ./daemon/... \
+    ./operator/... \
+    ./pkg/... \
+    ./plugins/... \
+    ./proxylib/... \
+    ./test/. \
+    ./test/config/... \
+    ./test/ginkgo-ext/... \
+    ./test/helpers/... \
+    ./test/runtime/... \
+    ./test/k8sT/... \
+    ./tools/...
+
+ineffassign:
+	@$(ECHO_CHECK) ineffassign
+	$(QUIET) ineffassign .
+
+logging-subsys-field:
+	@$(ECHO_CHECK) contrib/scripts/check-logging-subsys-field.sh
+	$(QUIET) contrib/scripts/check-logging-subsys-field.sh
+
+check-microk8s:
+	@$(ECHO_CHECK) microk8s is ready...
+	$(QUIET)sudo microk8s.status >/dev/null \
+		|| (echo "Error: Microk8s is not running" && exit 1)
+	$(QUIET)sudo microk8s.status -o yaml | grep -q "registry.*enabled" \
+		|| (echo "Error: Microk8s registry must be enabled" && exit 1)
+
+LOCAL_IMAGE_TAG=local
+LOCAL_IMAGE=localhost:32000/cilium/cilium:$(LOCAL_IMAGE_TAG)
+microk8s: check-microk8s
+	$(QUIET)$(MAKE) dev-docker-image DOCKER_IMAGE_TAG=$(LOCAL_IMAGE_TAG)
+	@echo "  DPLOY image to microk8s ($(LOCAL_IMAGE))"
+	$(CONTAINER_ENGINE_FULL) tag cilium/cilium-dev:$(LOCAL_IMAGE_TAG) $(LOCAL_IMAGE)
+	$(CONTAINER_ENGINE_FULL) push $(LOCAL_IMAGE)
+	$(QUIET)kubectl apply -f contrib/k8s/microk8s-prepull.yaml
+	$(QUIET)kubectl -n kube-system delete pod -l name=prepull
+	$(QUIET)kubectl -n kube-system rollout status ds/prepull
+	@echo
+	@echo "Update image tag like this when ready:"
+	@echo "    kubectl -n kube-system set image ds/cilium cilium-agent=$(LOCAL_IMAGE)"
+	@echo "Or, redeploy the Cilium pods:"
+	@echo "    kubectl -n kube-system delete pod -l k8s-app=cilium"
+
+precheck: ineffassign logging-subsys-field
+	@$(ECHO_CHECK) contrib/scripts/check-fmt.sh
+	$(QUIET) contrib/scripts/check-fmt.sh
+	@$(ECHO_CHECK) contrib/scripts/check-log-newlines.sh
+	$(QUIET) contrib/scripts/check-log-newlines.sh
+	@$(ECHO_CHECK) contrib/scripts/check-missing-tags-in-tests.sh
+	$(QUIET) contrib/scripts/check-missing-tags-in-tests.sh
+	@$(ECHO_CHECK) contrib/scripts/check-assert-deep-equals.sh
+	$(QUIET) contrib/scripts/check-assert-deep-equals.sh
+	$(QUIET) $(MAKE) -C bpf build_all
 
 pprof-help:
 	@echo "Available pprof targets:"
@@ -214,20 +457,20 @@ pprof-help:
 	@echo "  pprof-mutex"
 
 pprof-heap:
-	go tool pprof http://localhost:6060/debug/pprof/heap
+	$(QUIET)$(GO) tool pprof http://localhost:6060/debug/pprof/heap
 
 pprof-profile:
-	go tool pprof http://localhost:6060/debug/pprof/profile
+	$(QUIET)$(GO) tool pprof http://localhost:6060/debug/pprof/profile
 
 
 pprof-block:
-	go tool pprof http://localhost:6060/debug/pprof/block
+	$(QUIET)$(GO) tool pprof http://localhost:6060/debug/pprof/block
 
 pprof-trace-5s:
 	curl http://localhost:6060/debug/pprof/trace?seconds=5
 
 pprof-mutex:
-	go tool pprof http://localhost:6060/debug/pprof/mutex
+	$(QUIET)$(GO) tool pprof http://localhost:6060/debug/pprof/mutex
 
 update-authors:
 	@echo "Updating AUTHORS file..."
@@ -238,15 +481,18 @@ update-authors:
 	@cat .authors.aux >> AUTHORS
 
 docs-container:
-	grep -v -E "(SOURCE|GIT)_VERSION" .gitignore >.dockerignore
-	echo ".*" >>.dockerignore # .git pruned out
-	docker build -t cilium/docs-builder -f Documentation/Dockerfile .
+	$(QUIET)cp -r ./api ./Documentation/_api
+	$(CONTAINER_ENGINE_FULL) image build -t cilium/docs-builder -f Documentation/Dockerfile ./Documentation; \
+	  (ret=$$?; rm -r ./Documentation/_api && exit $$ret)
 
-render-docs: docs-container
-	-docker rm -f docs-cilium >/dev/null
-	docker run -ti -v $$(pwd):/srv/ cilium/docs-builder /bin/bash -c 'make html' && \
-	docker run -dit --name docs-cilium -p 8080:80 -v $$(pwd)/Documentation/_build/html/:/usr/local/apache2/htdocs/ httpd:2.4
-	@echo "$$(tput setaf 2)Running at http://localhost:8080$$(tput sgr0)"
+DOCS_PORT=9081
+render-docs: test-docs
+	$(CONTAINER_ENGINE_FULL) container run --rm -dit --name docs-cilium -p $(DOCS_PORT):80 -v $$(pwd)/Documentation/_build/html/:/usr/local/apache2/htdocs/ httpd:2.4
+	@echo "$$(tput setaf 2)Running at http://localhost:$(DOCS_PORT)$$(tput sgr0)"
+
+test-docs: docs-container
+	-$(CONTAINER_ENGINE_FULL) container rm -f docs-cilium >/dev/null 2>&1 || true
+	$(CONTAINER_ENGINE_FULL) container run --rm -v $$(pwd):/srv/ cilium/docs-builder /bin/bash -c 'make html'
 
 manpages:
 	-rm -r man
@@ -257,9 +503,32 @@ install-manpages:
 	cp man/* /usr/local/share/man/man1/
 	mandb
 
-postcheck: build
-	contrib/scripts/check-cmdref.sh
-	contrib/scripts/lock-check.sh
+# Strip "tabs assets" errors from the dummy target, but fail on target failure.
+check-docs:
+	$(QUIET)($(MAKE) -C Documentation/ dummy SPHINXOPTS="$(SPHINXOPTS)" 2>&1 && touch $@.ok) \
+		| grep -v "tabs assets"
+	@rm $@.ok 2>/dev/null
 
-.PHONY: force
+postcheck: build
+	@$(ECHO_CHECK) contrib/scripts/check-cmdref.sh
+	$(QUIET) MAKE=$(MAKE) contrib/scripts/check-cmdref.sh
+	@$(ECHO_CHECK) contrib/scripts/lock-check.sh
+	$(QUIET) contrib/scripts/lock-check.sh
+	@$(SKIP_DOCS) || $(MAKE) check-docs
+
+minikube:
+	$(QUIET) contrib/scripts/minikube.sh
+
+update-golang: update-golang-dockerfiles update-travis-go-version
+
+update-golang-dockerfiles:
+	$(QUIET) sed -i 's/GO_VERSION .*/GO_VERSION $(GO_VERSION)/g' Dockerfile.builder
+	$(QUIET) for fl in $(shell find . -name "*Dockerfile*") ; do sed -i 's/golang:.* /golang:$(GO_VERSION) as /g' $$fl ; done
+	@echo "Updated go version in Dockerfiles to $(GO_VERSION)"
+	
+update-travis-go-version:
+	$(QUIET) sed -e 's/TRAVIS_GO_VERSION/$(GO_VERSION)/g' .travis.yml.tmpl > .travis.yml
+	@echo "Updated go version in .travis.yml to $(GO_VERSION)"
+
+.PHONY: force generate-api generate-health-api install
 force :;

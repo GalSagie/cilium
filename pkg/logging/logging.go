@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,31 +19,22 @@ import (
 	"bytes"
 	"fmt"
 	"log/syslog"
-	"net"
 	"os"
 	"regexp"
-	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/evalphobia/logrus_fluent"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+
 	"github.com/sirupsen/logrus"
 	logrus_syslog "github.com/sirupsen/logrus/hooks/syslog"
 )
 
 const (
-	fAddr  = "fluentd.address"
-	fTag   = "fluentd.tag"
-	fLevel = "fluentd.level"
-
-	SLevel = "syslog.level"
-
-	lAddr     = "logstash.address"
-	lLevel    = "logstash.level"
-	lProtocol = "logstash.protocol"
-
+	SLevel   = "syslog.level"
 	Syslog   = "syslog"
-	Fluentd  = "fluentd"
-	Logstash = "logstash"
+	LevelOpt = "level"
 )
 
 var (
@@ -51,26 +42,14 @@ var (
 	// default to avoid external dependencies from writing out unexpectedly
 	DefaultLogger = InitializeDefaultLogger()
 
-	// DefaultLogLevel is the alternative we provide to Debug
-	DefaultLogLevel = logrus.InfoLevel
+	// DefaultLogLevelStr is the string representation of DefaultLogLevel. It
+	// is used to allow for injection of the logging level via go's ldflags in
+	// unit tests, as only injection with strings via ldflags is allowed.
+	DefaultLogLevelStr = "info"
 
 	// syslogOpts is the set of supported options for syslog configuration.
 	syslogOpts = map[string]bool{
 		"syslog.level": true,
-	}
-
-	// fluentDOpts is the set of supported options for fluentD configuration.
-	fluentDOpts = map[string]bool{
-		fAddr:  true,
-		fTag:   true,
-		fLevel: true,
-	}
-
-	// logstashOpts is the set of supported options for logstash configuration.
-	logstashOpts = map[string]bool{
-		lAddr:     true,
-		lLevel:    true,
-		lProtocol: true,
 	}
 
 	// syslogLevelMap maps logrus.Level values to syslog.Priority levels.
@@ -82,48 +61,85 @@ var (
 		logrus.InfoLevel:  syslog.LOG_INFO,
 		logrus.DebugLevel: syslog.LOG_DEBUG,
 	}
+
+	// LevelStringToLogrusLevel maps string representations of logrus.Level into
+	// their corresponding logrus.Level.
+	LevelStringToLogrusLevel = map[string]logrus.Level{
+		"panic":   logrus.PanicLevel,
+		"error":   logrus.ErrorLevel,
+		"warning": logrus.WarnLevel,
+		"info":    logrus.InfoLevel,
+		"debug":   logrus.DebugLevel,
+	}
+
+	logOptions = LogOptions{}
 )
 
-// setFireLevels returns a slice of logrus.Level values higher in priority
-// and including level, excluding any levels lower in priority.
-func setFireLevels(level logrus.Level) []logrus.Level {
-	switch level {
-	case logrus.PanicLevel:
-		return []logrus.Level{logrus.PanicLevel}
-	case logrus.FatalLevel:
-		return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel}
-	case logrus.ErrorLevel:
-		return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel}
-	case logrus.WarnLevel:
-		return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel}
-	case logrus.InfoLevel:
-		return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel, logrus.InfoLevel}
-	case logrus.DebugLevel:
-		return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel, logrus.InfoLevel, logrus.DebugLevel}
-	default:
-		logrus.Infof("logrus level %v is not supported at this time; defaulting to info level", level)
-		return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel, logrus.InfoLevel}
-	}
-}
+// LogOptions maps configuration key-value pairs related to logging.
+type LogOptions map[string]string
 
 // InitializeDefaultLogger returns a logrus Logger with a custom text formatter.
 func InitializeDefaultLogger() *logrus.Logger {
 	logger := logrus.New()
 	logger.Formatter = setupFormatter()
+	logger.SetLevel(LevelStringToLogrusLevel[DefaultLogLevelStr])
 	return logger
+}
+
+// GetLogLevelFromConfig returns the log level provided via global
+// configuration. If the logging level is invalid, ok will be false.
+func GetLogLevelFromConfig() (logrus.Level, bool) {
+	return logOptions.GetLogLevel()
+}
+
+// GetLogLevel returns the log level specified in the provided LogOptions. If
+// it is not set in the options, ok will be false.
+func (o LogOptions) GetLogLevel() (logrus.Level, bool) {
+	lvl, ok := LevelStringToLogrusLevel[strings.ToLower(o[LevelOpt])]
+	return lvl, ok
+}
+
+// configureLogLevelFromOptions returns the log level based off of the value of
+// LevelOpt in o, or the default log level if the value in the map is invalid or
+// not set.
+func (o LogOptions) configureLogLevelFromOptions() logrus.Level {
+	var level logrus.Level
+	if levelOpt, ok := o[LevelOpt]; ok {
+		if convertedLevel, ok := o.GetLogLevel(); ok {
+			level = convertedLevel
+		} else {
+			// Invalid configuration provided, go with default.
+			DefaultLogger.WithField(logfields.LogSubsys, "logging").Warningf("invalid logging level provided: %s; setting to %s", levelOpt, DefaultLogLevelStr)
+			o[LevelOpt] = DefaultLogLevelStr
+			level = LevelStringToLogrusLevel[DefaultLogLevelStr]
+		}
+	} else {
+		// No logging option provided, default to DefaultLogLevelStr.
+		o[LevelOpt] = DefaultLogLevelStr
+		level = LevelStringToLogrusLevel[DefaultLogLevelStr]
+	}
+	return level
+}
+
+// configureLogLevelFromOptions sets the log level of the DefaultLogger based
+// off of the value of LevelOpt in logOpts. If LevelOpt is not set in logOpts,
+// it defaults to DefaultLogLevelStr.
+func setLogLevelFromOptions(logOpts LogOptions) {
+	DefaultLogger.SetLevel(logOpts.configureLogLevelFromOptions())
 }
 
 // SetupLogging sets up each logging service provided in loggers and configures
 // each logger with the provided logOpts.
 func SetupLogging(loggers []string, logOpts map[string]string, tag string, debug bool) error {
+	logOptions = logOpts
+
 	// Set default logger to output to stdout if no loggers are provided.
 	if len(loggers) == 0 {
 		// TODO: switch to a per-logger version when we upgrade to logrus >1.0.3
 		logrus.SetOutput(os.Stdout)
 	}
 
-	SetLogLevel(DefaultLogLevel)
-	ToggleDebugLogs(debug)
+	ConfigureLogLevel(debug)
 
 	// always suppress the default logger so libraries don't print things
 	logrus.SetLevel(logrus.PanicLevel)
@@ -131,33 +147,14 @@ func SetupLogging(loggers []string, logOpts map[string]string, tag string, debug
 	// Iterate through all provided loggers and configure them according
 	// to user-provided settings.
 	for _, logger := range loggers {
-		valuesToValidate := getLogDriverConfig(logger, logOpts)
 		switch logger {
 		case Syslog:
-			valuesToValidate := getLogDriverConfig(Syslog, logOpts)
+			valuesToValidate := getLogDriverConfig(Syslog, logOptions)
 			err := validateOpts(Syslog, valuesToValidate, syslogOpts)
 			if err != nil {
 				return err
 			}
 			setupSyslog(valuesToValidate, tag, debug)
-		case Fluentd:
-			err := validateOpts(logger, valuesToValidate, fluentDOpts)
-			if err != nil {
-				return err
-			}
-			setupFluentD(valuesToValidate, debug)
-			//TODO - need to finish logstash integration.
-		/*case Logstash:
-		fmt.Printf("SetupLogging: in logstash case\n")
-		err := validateOpts(logger, valuesToValidate, logstashOpts)
-		fmt.Printf("SetupLogging: validating options for logstash complete\n")
-		if err != nil {
-			fmt.Printf("SetupLogging: error validating logstash opts %v\n", err.Error())
-			return err
-		}
-		fmt.Printf("SetupLogging: about to setup logstash\n")
-		setupLogstash(valuesToValidate)
-		*/
 		default:
 			return fmt.Errorf("provided log driver %q is not a supported log driver", logger)
 		}
@@ -169,20 +166,22 @@ func SetupLogging(loggers []string, logOpts map[string]string, tag string, debug
 // SetLogLevel sets the log level on DefaultLogger. This logger is, by
 // convention, the base logger for package specific ones thus setting the level
 // here impacts the default logging behaviour.
-// This function is thread-safe when logging, reading DefaultLogger.Level is
+// This function is thread-safe when logging, reading DefaultLogger.LevelOpt is
 // not protected this way, however.
 func SetLogLevel(level logrus.Level) {
 	DefaultLogger.SetLevel(level)
 }
 
-// ToggleDebugLogs switches on or off debugging logs. It will select
-// DefaultLogLevel when turning debug off.
+// ConfigureLogLevel configures the logging level of the global logger. If
+// debugging is not enabled, it will set the logging level based off of the
+// logging options configured at bootstrap. Debug being enabled takes precedence
+// over the configuration in the logging options.
 // It is thread-safe.
-func ToggleDebugLogs(debug bool) {
+func ConfigureLogLevel(debug bool) {
 	if debug {
 		SetLogLevel(logrus.DebugLevel)
 	} else {
-		SetLogLevel(DefaultLogLevel)
+		setLogLevelFromOptions(logOptions)
 	}
 }
 
@@ -230,77 +229,6 @@ func setupFormatter() logrus.Formatter {
 	return fileFormat
 }
 
-// setupFluentD sets up and configures FluentD with the provided options in
-// logOpts. If some options are not provided, sensible defaults are used.
-func setupFluentD(logOpts map[string]string, debug bool) {
-	//If no logging level set for fluentd, use debug value if it is set.
-	// Logging level set for fluentd takes precedence over debug flag
-	// fluent.level provided.
-	logLevel, ok := logOpts[fLevel]
-	if !ok {
-		if debug {
-			logLevel = "debug"
-		} else {
-			logLevel = "info"
-		}
-	}
-	level, err := logrus.ParseLevel(logLevel)
-	if err != nil {
-		DefaultLogger.Fatal(err)
-	}
-
-	hostAndPort, ok := logOpts[fAddr]
-	if !ok {
-		hostAndPort = "localhost:24224"
-	}
-
-	host, strPort, err := net.SplitHostPort(hostAndPort)
-	if err != nil {
-		DefaultLogger.Fatal(err)
-	}
-	port, err := strconv.Atoi(strPort)
-	if err != nil {
-		DefaultLogger.Fatal(err)
-	}
-
-	h, err := logrus_fluent.New(host, port)
-	if err != nil {
-		DefaultLogger.Fatal(err)
-	}
-
-	tag, ok := logOpts[fTag]
-	if ok {
-		h.SetTag(tag)
-	}
-
-	// set custom fire level
-	h.SetLevels(setFireLevels(level))
-	// TODO: switch to a per-logger version when we upgrade to logrus >1.0.3
-	logrus.AddHook(h)
-}
-
-// setupLogstash sets up and configures Logstash with the provided options in
-// logOpts. If some options are not provided, sensible defaults are used.
-/// FIXME GH-1578 - needs to be tested with a working logstash setup.
-//func setupLogstash(logOpts map[string]string) {
-//	hostAndPort, ok := logOpts[lAddr]
-//	if !ok {
-//		hostAndPort = "172.17.0.2:999"
-//	}
-//
-//	protocol, ok := logOpts[lProtocol]
-//	if !ok {
-//		protocol = "tcp"
-//	}
-//
-//	h, err := logrustash.NewHook(protocol, hostAndPort, "cilium")
-//	if err != nil {
-//		DefaultLogger.Fatal(err)
-//	}
-//
-//	DefaultLogger.AddHook(h)
-//}
-
 // validateOpts iterates through all of the keys in logOpts, and errors out if
 // the key in logOpts is not a key in supportedOpts.
 func validateOpts(logDriver string, logOpts map[string]string, supportedOpts map[string]bool) error {
@@ -335,4 +263,15 @@ func MultiLine(logFn func(args ...interface{}), output string) {
 	for scanner.Scan() {
 		logFn(scanner.Text())
 	}
+}
+
+// CanLogAt returns whether a log message at the given level would be
+// logged by the given logger.
+func CanLogAt(logger *logrus.Logger, level logrus.Level) bool {
+	return GetLevel(logger) >= level
+}
+
+// GetLevel returns the log level of the given logger.
+func GetLevel(logger *logrus.Logger) logrus.Level {
+	return logrus.Level(atomic.LoadUint32((*uint32)(&logger.Level)))
 }

@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	log        = logging.DefaultLogger
+	log        = logging.DefaultLogger.WithField(logfields.LogSubsys, "cilium-docker")
 	pluginPath string
 	driverSock string
 	debug      bool
@@ -50,6 +50,10 @@ connected to a Docker network of type "cilium".`,
   docker run --net my_network hello-world
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+		common.RequireRootPrivilege("cilium-docker")
+
+		createPluginSock()
+
 		if d, err := driver.NewDriver(ciliumAPI); err != nil {
 			log.WithError(err).Fatal("Unable to create cilium-net driver")
 		} else {
@@ -79,13 +83,13 @@ func init() {
 
 func initConfig() {
 	if debug {
-		log.SetLevel(logrus.DebugLevel)
+		log.Logger.SetLevel(logrus.DebugLevel)
 	} else {
-		log.SetLevel(logrus.InfoLevel)
+		log.Logger.SetLevel(logrus.InfoLevel)
 	}
+}
 
-	common.RequireRootPrivilege("cilium-docker")
-
+func createPluginSock() {
 	driverSock = filepath.Join(pluginPath, "cilium.sock")
 
 	if err := os.MkdirAll(pluginPath, 0755); err != nil && !os.IsExist(err) {

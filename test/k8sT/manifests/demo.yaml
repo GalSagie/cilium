@@ -1,3 +1,12 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: app1-account
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: app2-account
 ---
 apiVersion: v1
 kind: Service
@@ -21,11 +30,18 @@ spec:
         id: app1
         zgroup: testapp
     spec:
+      serviceAccountName: app1-account
+      terminationGracePeriodSeconds: 0
       containers:
       - name: web
-        image: cilium/demo-httpd
+        image: docker.io/cilium/demo-httpd:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
       nodeSelector:
         "kubernetes.io/hostname": k8s1
 ---
@@ -40,10 +56,14 @@ spec:
       labels:
         id: app2
         zgroup: testapp
+        appSecond: "true"
     spec:
+      serviceAccountName: app2-account
+      terminationGracePeriodSeconds: 0
       containers:
       - name: app-frontend
-        image: cilium/demo-client
+        image: docker.io/cilium/demo-client:latest
+        imagePullPolicy: IfNotPresent
         command: [ "sleep" ]
         args:
           - "1000h"
@@ -62,9 +82,11 @@ spec:
         id: app3
         zgroup: testapp
     spec:
+      terminationGracePeriodSeconds: 0
       containers:
       - name: app-frontend
-        image: cilium/demo-client
+        image: docker.io/cilium/demo-client:latest
+        imagePullPolicy: IfNotPresent
         command: [ "sleep" ]
         args:
           - "1000h"

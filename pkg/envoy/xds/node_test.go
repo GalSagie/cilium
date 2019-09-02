@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package xds
 
 import (
-	"github.com/cilium/cilium/pkg/envoy/api"
+	envoy_api_v2_core "github.com/cilium/proxy/go/envoy/api/v2/core"
 
 	. "gopkg.in/check.v1"
 )
@@ -25,7 +27,7 @@ type NodeSuite struct{}
 var _ = Suite(&NodeSuite{})
 
 func (s *NodeSuite) TestIstioNodeToIP(c *C) {
-	var node api.Node
+	var node envoy_api_v2_core.Node
 	var ip string
 	var err error
 
@@ -35,10 +37,10 @@ func (s *NodeSuite) TestIstioNodeToIP(c *C) {
 	c.Check(ip, Equals, "10.1.1.0")
 
 	node.Id = "sidecar~10.1.1.0~v0.default"
-	ip, err = IstioNodeToIP(&node)
+	_, err = IstioNodeToIP(&node)
 	c.Assert(err, Not(IsNil))
 
 	node.Id = "sidecar~not-an-ip~v0.default~default.svc.cluster.local"
-	ip, err = IstioNodeToIP(&node)
+	_, err = IstioNodeToIP(&node)
 	c.Assert(err, Not(IsNil))
 }

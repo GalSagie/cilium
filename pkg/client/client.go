@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,28 +15,41 @@
 package client
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	clientapi "github.com/cilium/cilium/api/v1/client"
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/daemon/defaults"
-	"github.com/cilium/cilium/pkg/ip"
+	"github.com/cilium/cilium/pkg/defaults"
 
 	runtime_client "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
+	"golang.org/x/net/context"
 )
 
 type Client struct {
 	clientapi.Cilium
+}
+
+// DefaultSockPath returns default UNIX domain socket path or
+// path set using CILIUM_SOCK env variable
+func DefaultSockPath() string {
+	// Check if environment variable points to socket
+	e := os.Getenv(defaults.SockPathEnv)
+	if e == "" {
+		// If unset, fall back to default value
+		e = defaults.SockPath
+	}
+	return "unix://" + e
+
 }
 
 func configureTransport(tr *http.Transport, proto, addr string) *http.Transport {
@@ -47,12 +60,12 @@ func configureTransport(tr *http.Transport, proto, addr string) *http.Transport 
 	if proto == "unix" {
 		// No need for compression in local communications.
 		tr.DisableCompression = true
-		tr.Dial = func(_, _ string) (net.Conn, error) {
+		tr.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial(proto, addr)
 		}
 	} else {
 		tr.Proxy = http.ProxyFromEnvironment
-		tr.Dial = (&net.Dialer{}).Dial
+		tr.DialContext = (&net.Dialer{}).DialContext
 	}
 
 	return tr
@@ -63,16 +76,49 @@ func NewDefaultClient() (*Client, error) {
 	return NewClient("")
 }
 
+// NewDefaultClientWithTimeout creates a client with default parameters connecting to UNIX
+// domain socket and waits for cilium-agent availability.
+func NewDefaultClientWithTimeout(timeout time.Duration) (*Client, error) {
+	timeoutAfter := time.After(timeout)
+	var c *Client
+	var err error
+	for {
+		select {
+		case <-timeoutAfter:
+			return nil, fmt.Errorf("failed to create cilium agent client after %f seconds timeout: %s", timeout.Seconds(), err)
+		default:
+		}
+
+		c, err = NewDefaultClient()
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		for {
+			select {
+			case <-timeoutAfter:
+				return nil, fmt.Errorf("failed to create cilium agent client after %f seconds timeout: %s", timeout.Seconds(), err)
+			default:
+			}
+			// This is an API call that we do to the cilium-agent to check
+			// if it is up and running.
+			_, err = c.Daemon.GetConfig(nil)
+			if err != nil {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return c, nil
+		}
+	}
+}
+
 // NewClient creates a client for the given `host`.
+// If host is nil then use SockPath provided by CILIUM_SOCK
+// or the cilium default SockPath
 func NewClient(host string) (*Client, error) {
 	if host == "" {
-		// Check if environment variable points to socket
-		e := os.Getenv(defaults.SockPathEnv)
-		if e == "" {
-			// If unset, fall back to default value
-			e = defaults.SockPath
-		}
-		host = "unix://" + e
+		host = DefaultSockPath()
 	}
 	tmp := strings.SplitN(host, "://", 2)
 	if len(tmp) != 2 {
@@ -101,31 +147,16 @@ func Hint(err error) error {
 	if err == nil {
 		return err
 	}
+
+	if err == context.DeadlineExceeded {
+		return fmt.Errorf("Cilium API client timeout exceeded")
+	}
+
 	e, _ := url.PathUnescape(err.Error())
 	if strings.Contains(err.Error(), defaults.SockPath) {
 		return fmt.Errorf("%s\nIs the agent running?", e)
 	}
 	return fmt.Errorf("%s", e)
-}
-
-func formatNodeAddress(w io.Writer, elem *models.NodeAddressingElement, title, prefix string) bool {
-	if elem.Enabled || title == "" {
-		if title != "" {
-			fmt.Fprintf(w, "%s%s Address:\t%s\n", prefix, title, elem.IP)
-		} else {
-			fmt.Fprintf(w, "%s%s:\n", prefix, elem.IP)
-		}
-		if elem.AddressType != "" {
-			fmt.Fprintf(w, "%s Type:\t%s\n", prefix, elem.AddressType)
-		}
-		if elem.AllocRange != "" {
-			fmt.Fprintf(w, "%sAllocRange:\t%s\n", prefix, elem.AllocRange)
-		}
-
-		return true
-	}
-
-	return false
 }
 
 func timeSince(since time.Time) string {
@@ -159,14 +190,14 @@ func FormatStatusResponseBrief(w io.Writer, sr *models.StatusResponse) {
 	msg := ""
 
 	switch {
-	case statusUnhealthy(sr.Cilium):
-		msg = fmt.Sprintf("cilium: %s", sr.Cilium.Msg)
-	case statusUnhealthy(sr.ContainerRuntime):
-		msg = fmt.Sprintf("container runtime: %s", sr.ContainerRuntime.Msg)
 	case statusUnhealthy(sr.Kvstore):
 		msg = fmt.Sprintf("kvstore: %s", sr.Kvstore.Msg)
+	case statusUnhealthy(sr.ContainerRuntime):
+		msg = fmt.Sprintf("container runtime: %s", sr.ContainerRuntime.Msg)
 	case sr.Kubernetes != nil && stateUnhealthy(sr.Kubernetes.State):
 		msg = fmt.Sprintf("kubernetes: %s", sr.Kubernetes.Msg)
+	case statusUnhealthy(sr.Cilium):
+		msg = fmt.Sprintf("cilium: %s", sr.Cilium.Msg)
 	case sr.Cluster != nil && statusUnhealthy(sr.Cluster.CiliumHealth):
 		msg = fmt.Sprintf("cilium-health: %s", sr.Cluster.CiliumHealth.Msg)
 	}
@@ -198,7 +229,7 @@ func FormatStatusResponseBrief(w io.Writer, sr *models.StatusResponse) {
 // cause all details about that aspect of the status to be printed to the
 // terminal. For each of these, if they are false then only a summary will be
 // printed, with perhaps some detail if there are errors.
-func FormatStatusResponse(w io.Writer, sr *models.StatusResponse, allAddresses, allControllers, allNodes bool) {
+func FormatStatusResponse(w io.Writer, sr *models.StatusResponse, allAddresses, allControllers, allNodes, allRedirects bool) {
 	if sr.Kvstore != nil {
 		fmt.Fprintf(w, "KVStore:\t%s\t%s\n", sr.Kvstore.State, sr.Kvstore.Msg)
 	}
@@ -209,11 +240,27 @@ func FormatStatusResponse(w io.Writer, sr *models.StatusResponse, allAddresses, 
 	if sr.Kubernetes != nil {
 		fmt.Fprintf(w, "Kubernetes:\t%s\t%s\n", sr.Kubernetes.State, sr.Kubernetes.Msg)
 		if sr.Kubernetes.State != models.K8sStatusStateDisabled {
+			sort.Strings(sr.Kubernetes.K8sAPIVersions)
 			fmt.Fprintf(w, "Kubernetes APIs:\t[\"%s\"]\n", strings.Join(sr.Kubernetes.K8sAPIVersions, "\", \""))
 		}
 	}
 	if sr.Cilium != nil {
 		fmt.Fprintf(w, "Cilium:\t%s\t%s\n", sr.Cilium.State, sr.Cilium.Msg)
+	}
+
+	if sr.Stale != nil {
+		sortedProbes := make([]string, 0, len(sr.Stale))
+		for probe := range sr.Stale {
+			sortedProbes = append(sortedProbes, probe)
+		}
+		sort.Strings(sortedProbes)
+
+		stalesStr := make([]string, 0, len(sr.Stale))
+		for _, probe := range sortedProbes {
+			stalesStr = append(stalesStr, fmt.Sprintf("%q since %s", probe, sr.Stale[probe]))
+		}
+
+		fmt.Fprintf(w, "Stale status:\t%s\n", strings.Join(stalesStr, ", "))
 	}
 
 	if nm := sr.NodeMonitor; nm != nil {
@@ -226,72 +273,24 @@ func FormatStatusResponse(w io.Writer, sr *models.StatusResponse, allAddresses, 
 		fmt.Fprintf(w, "NodeMonitor:\tDisabled\n")
 	}
 
-	var localNode *models.NodeElement
 	if sr.Cluster != nil {
 		if sr.Cluster.CiliumHealth != nil {
 			ch := sr.Cluster.CiliumHealth
 			fmt.Fprintf(w, "Cilium health daemon:\t%s\t%s\n", ch.State, ch.Msg)
 		}
-		for _, node := range sr.Cluster.Nodes {
-			if node.Name == sr.Cluster.Self {
-				localNode = node
-			} else {
-				continue
-			}
-		}
 	}
 
 	if sr.IPAM != nil {
-		var v4CIDR, v6CIDR string
-		if localNode != nil {
-			if nIPs := ip.CountIPsInCIDR(localNode.PrimaryAddress.IPV4.AllocRange); nIPs > 0 {
-				v4CIDR = fmt.Sprintf("/%d", nIPs)
-			}
-			if nIPs := ip.CountIPsInCIDR(localNode.PrimaryAddress.IPV6.AllocRange); nIPs > 0 {
-				v6CIDR = fmt.Sprintf("/%d", nIPs)
-			}
-		}
-		fmt.Fprintf(w, "IPv4 address pool:\t%d%s allocated\n", len(sr.IPAM.IPV4), v4CIDR)
+		fmt.Fprintf(w, "IPAM:\t%s\n", sr.IPAM.Status)
 		if allAddresses {
-			for _, ipv4 := range sr.IPAM.IPV4 {
-				fmt.Fprintf(w, "  %s\n", ipv4)
+			fmt.Fprintf(w, "Allocated addresses:\n")
+			out := []string{}
+			for ip, owner := range sr.IPAM.Allocations {
+				out = append(out, fmt.Sprintf("  %s (%s)", ip, owner))
 			}
-		}
-		fmt.Fprintf(w, "IPv6 address pool:\t%d%s allocated\n", len(sr.IPAM.IPV6), v6CIDR)
-		if allAddresses {
-			for _, ipv6 := range sr.IPAM.IPV6 {
-				fmt.Fprintf(w, "  %s\n", ipv6)
-			}
-		}
-	}
-
-	if sr.Cluster != nil {
-		fmt.Fprintf(w, "Known cluster nodes:\t%d\n", len(sr.Cluster.Nodes))
-		for _, node := range sr.Cluster.Nodes {
-			localStr := ""
-			if node.Name == sr.Cluster.Self {
-				localStr = " (localhost)"
-			} else if !allNodes {
-				continue
-			}
-			fmt.Fprintf(w, " %s%s:\n", node.Name, localStr)
-			formatNodeAddress(w, node.PrimaryAddress.IPV4, "Primary", "  ")
-			formatNodeAddress(w, node.PrimaryAddress.IPV6, "Primary", "  ")
-
-			buf := new(bytes.Buffer)
-			secondary := false
-			fmt.Fprintf(buf, "  Secondary Addresses:\n")
-			for _, elem := range node.SecondaryAddresses {
-				if formatNodeAddress(buf, elem, "", "   ") {
-					secondary = true
-				}
-			}
-			if secondary {
-				fmt.Fprintf(w, "%s", buf.String())
-			}
-			if node.HealthEndpointAddress != nil {
-				formatNodeAddress(w, node.HealthEndpointAddress.IPV4, "Health Endpoint", "  ")
-				formatNodeAddress(w, node.HealthEndpointAddress.IPV6, "Health Endpoint", "  ")
+			sort.Strings(out)
+			for _, line := range out {
+				fmt.Fprintln(w, line)
 			}
 		}
 	}
@@ -326,11 +325,19 @@ func FormatStatusResponse(w io.Writer, sr *models.StatusResponse, allAddresses, 
 		fmt.Fprintf(w, "Controller Status:\t%d/%d healthy\n", nOK, len(sr.Controllers))
 		if len(out) > 1 {
 			tab := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+			sort.Strings(out)
 			for _, s := range out {
 				fmt.Fprint(tab, s)
 			}
 			tab.Flush()
 		}
 
+	}
+
+	if sr.Proxy != nil {
+		fmt.Fprintf(w, "Proxy Status:\tOK, ip %s, port-range %s\n",
+			sr.Proxy.IP, sr.Proxy.PortRange)
+	} else {
+		fmt.Fprintf(w, "Proxy Status:\tNo managed proxy redirect\n")
 	}
 }

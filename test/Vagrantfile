@@ -1,13 +1,36 @@
 # -*- mode: ruby -*-
-# vi: set ft=ruby :
+# vi: set ft=ruby
+Vagrant.require_version ">= 2.2.0"
+
+# The source of truth for vagrant box versions.
+# Sets SERVER_BOX, SERVER_VERSION, NETNEXT_SERVER_BOXET and NEXT_SERVER_VERSION
+# Accepts overrides from env variables
+require_relative '../vagrant_box_defaults.rb'
+$SERVER_BOX = (ENV['SERVER_BOX'] || $SERVER_BOX)
+$SERVER_VERSION= (ENV['SERVER_VERSION'] || $SERVER_VERSION)
+$NETNEXT_SERVER_BOX = (ENV['NETNEXT_SERVER_BOX'] || $NETNEXT_SERVER_BOX)
+$NETNEXT_SERVER_VERSION= (ENV['NETNEXT_SERVER_VERSION'] || $NETNEXT_SERVER_VERSION)
 
 $BUILD_NUMBER = ENV['BUILD_NUMBER'] || "0"
 $JOB_NAME = ENV['JOB_BASE_NAME'] || "LOCAL"
-$K8S_VERSION = ENV['K8S_VERSION'] || "1.8"
+$K8S_VERSION = ENV['K8S_VERSION'] || "1.15"
 $K8S_NODES = (ENV['K8S_NODES'] || "2").to_i
+$NFS = ENV['NFS']=="1"? true : false
+$IPv6=(ENV['IPv6'] || "0")
+$CONTAINER_RUNTIME=(ENV['CONTAINER_RUNTIME'] || "docker")
+$CNI_INTEGRATION=(ENV['CNI_INTEGRATION'] || "")
+$CILIUM_IMAGE = ENV['CILIUM_IMAGE'] || ""
+$CILIUM_OPERATOR_IMAGE = ENV['CILIUM_OPERATOR_IMAGE'] || ""
+$SKIP_K8S_PROVISION = ENV['SKIP_K8S_PROVISION'] || "false"
 
-$SERVER_BOX= "cilium/ginkgo"
-$SERVER_VERSION="0.0.4"
+# RAM and CPU settings
+$MEMORY = (ENV['MEMORY'] || "4096").to_i
+$CPU = (ENV['CPUS'] || "2").to_i
+
+if ENV['NETNEXT'] == "true"
+    $SERVER_BOX = $NETNEXT_SERVER_BOX
+    $SERVER_VERSION = $NETNEXT_SERVER_VERSION
+end
 
 ENV["VAGRANT_DEFAULT_PROVIDER"] = "virtualbox"
 Vagrant.configure("2") do |config|
@@ -15,20 +38,28 @@ Vagrant.configure("2") do |config|
     config.vm.define "runtime" do |server|
         server.vm.provider "virtualbox" do |vb|
             vb.customize ["modifyvm", :id, "--hwvirtex", "on"]
-            vb.cpus = 2
-            vb.memory=2048
+            vb.cpus = $CPU
+            vb.memory= $MEMORY
             vb.linked_clone = true
+            vb.default_nic_type = "virtio"
+            # Prevent VirtualBox from interfering with host audio stack
+            vb.customize ["modifyvm", :id, "--audio", "none"]
         end
 
         server.vm.box =  "#{$SERVER_BOX}"
         server.vm.box_version = $SERVER_VERSION
+        server.vm.boot_timeout = 600
         server.vm.hostname = "runtime"
-        server.vm.synced_folder "../", "/src/"
+
+        # This network is only used by NFS
+        server.vm.network "private_network", type: "dhcp"
+        server.vm.synced_folder "../", "/home/vagrant/go/src/github.com/cilium/cilium",
+            nfs: $NFS
 
         # Provision section
         server.vm.provision :shell,
             :inline => "sed -i 's/^mesg n$/tty -s \\&\\& mesg n/g' /root/.profile"
-        server.vm.provision "file", source: "provision", destination: "/tmp/provision"
+        server.vm.provision "file", source: "provision/", destination: "/tmp/"
         server.vm.provision "shell" do |sh|
             sh.path = "./provision/runtime_install.sh"
             sh.env = {}
@@ -38,28 +69,50 @@ Vagrant.configure("2") do |config|
     (1..$K8S_NODES).each do |i|
         config.vm.define "k8s#{i}-#{$K8S_VERSION}" do |server|
             server.vm.provider "virtualbox" do |vb|
-                # vb.customize ["modifyvm", :id, "--memory", "2048"]
                 vb.customize ["modifyvm", :id, "--hwvirtex", "on"]
-                vb.cpus = 2
-                vb.memory=2048
+                vb.cpus = $CPU
+                vb.memory= $MEMORY
                 vb.linked_clone = true
+                vb.default_nic_type = "virtio"
+                # Prevent VirtualBox from interfering with host audio stack
+                vb.customize ["modifyvm", :id, "--audio", "none"]
+                # Use serial ports if the VM is no longer accessible via SSH
+                vb.customize ["modifyvm", :id, "--uart1", "0x3F8", "4"]
+                vb.customize ["modifyvm", :id, "--uartmode1", "server", "k8s#{i}-#{$K8S_VERSION}-ttyS0.sock"]
             end
 
             server.vm.box =  "#{$SERVER_BOX}"
             server.vm.box_version = $SERVER_VERSION
             server.vm.hostname = "k8s#{i}"
+            server.vm.boot_timeout = 600
             server.vm.network "private_network",
                 ip: "192.168.36.1#{i}",
                 virtualbox__intnet: "cilium-k8s#{$BUILD_NUMBER}-#{$JOB_NAME}-#{$K8S_VERSION}"
 
-            server.vm.synced_folder "../", "/src/"
+            # @TODO: Clean this one when https://github.com/hashicorp/vagrant/issues/9822 is fixed.
+            server.vm.provision "ipv6-config",
+                type: "shell",
+                run: "always",
+                inline: "ip -6 a a fd04::1#{i}/96 dev enp0s8 || true"
+
+            # This network is only used by NFS
+            server.vm.network "private_network", type: "dhcp"
+            server.vm.synced_folder "../", "/home/vagrant/go/src/github.com/cilium/cilium",
+                nfs: $NFS
             # Provision section
             server.vm.provision :shell,
+                :inline => "sudo sysctl -w net.ipv6.conf.all.forwarding=1"
+            server.vm.provision :shell,
                 :inline => "sed -i 's/^mesg n$/tty -s \\&\\& mesg n/g' /root/.profile"
-            server.vm.provision "file", source: "provision", destination: "/tmp/provision"
+            server.vm.provision "file", source: "provision/", destination: "/tmp/"
             server.vm.provision "shell" do |sh|
                 sh.path = "./provision/k8s_install.sh"
-                sh.args = ["k8s#{i}", "192.168.36.1#{i}", "#{$K8S_VERSION}"]
+                sh.args = [
+                    "k8s#{i}", "192.168.36.1#{i}", "#{$K8S_VERSION}",
+                    "#{$IPv6}", "#{$CONTAINER_RUNTIME}", "#{$CNI_INTEGRATION}"]
+                sh.env = {"CILIUM_IMAGE" => "#{$CILIUM_IMAGE}",
+                          "CILIUM_OPERATOR_IMAGE" => "#{$CILIUM_OPERATOR_IMAGE}",
+                          "SKIP_K8S_PROVISION" => "#{$SKIP_K8S_PROVISION}"}
             end
         end
     end

@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,292 +15,70 @@
 package cmd
 
 import (
-	"bytes"
-	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/cilium/cilium/daemon/defaults"
-	"github.com/cilium/cilium/monitor/payload"
-	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/monitor"
+	"github.com/cilium/cilium/pkg/monitor/agent/listener"
+	"github.com/cilium/cilium/pkg/monitor/format"
+	"github.com/cilium/cilium/pkg/monitor/payload"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 )
 
 const (
-	msgSeparator = "------------------------------------------------------------------------------"
-	connTimeout  = 12 * time.Second
+	connTimeout = 12 * time.Second
 )
 
 // monitorCmd represents the monitor command
-var monitorCmd = &cobra.Command{
-	Use:   "monitor",
-	Short: "Monitoring",
-	Long: `The monitor displays notifications and events emitted by the BPF
+var (
+	monitorCmd = &cobra.Command{
+		Use:   "monitor",
+		Short: "Display BPF program events",
+		Long: `The monitor displays notifications and events emitted by the BPF
 programs attached to endpoints and devices. This includes:
   * Dropped packet notifications
   * Captured packet traces
   * Debugging information`,
-	Run: func(cmd *cobra.Command, args []string) {
-		runMonitor()
-	},
-}
-
-type uint16Flags []uint16
-
-var _ pflag.Value = &uint16Flags{}
-
-func (i *uint16Flags) String() string {
-	pieces := make([]string, 0, len(*i))
-	for _, v := range *i {
-		pieces = append(pieces, strconv.Itoa(int(v)))
+		Run: func(cmd *cobra.Command, args []string) {
+			runMonitor(args)
+		},
 	}
-	return strings.Join(pieces, ", ")
-}
-
-func (i *uint16Flags) Set(value string) error {
-	v, err := strconv.Atoi(value)
-	if err != nil {
-		return err
-	}
-	*i = append(*i, uint16(v))
-	return nil
-}
-
-func (i *uint16Flags) Type() string {
-	return "[]uint16"
-}
-
-func (i *uint16Flags) has(value uint16) bool {
-	for _, v := range *i {
-		if v == value {
-			return true
-		}
-	}
-
-	return false
-}
-
-// Verbosity levels for formatting output.
-type Verbosity uint8
-
-const (
-	// INFO is the level of verbosity in which summaries of Drop and Capture
-	// messages are printed out when the monitor is invoked
-	INFO Verbosity = iota + 1
-	// DEBUG is the level of verbosity in which more information about packets
-	// is printed than in INFO mode. Debug, Drop, and Capture messages are printed.
-	DEBUG
-	// VERBOSE is the level of verbosity in which the most information possible
-	// about packets is printed out. Currently is not utilized.
-	VERBOSE
+	printer    = format.NewMonitorFormatter(format.INFO)
+	socketPath = ""
 )
-
-func listEventTypes() []string {
-	types := make([]string, len(eventTypes))
-	i := 0
-	for k := range eventTypes {
-		types[i] = k
-		i++
-	}
-	sort.Strings(types)
-	return types
-}
 
 func init() {
 	rootCmd.AddCommand(monitorCmd)
-	monitorCmd.Flags().BoolVar(&hex, "hex", false, "Do not dissect, print payload in HEX")
-	monitorCmd.Flags().StringVarP(&eventType, "type", "t", "", fmt.Sprintf("Filter by event types %v", listEventTypes()))
-	monitorCmd.Flags().Var(&fromSource, "from", "Filter by source endpoint id")
-	monitorCmd.Flags().Var(&toDst, "to", "Filter by destination endpoint id")
-	monitorCmd.Flags().Var(&related, "related-to", "Filter by either source or destination endpoint id")
-	monitorCmd.Flags().BoolVarP(&verboseMonitor, "verbose", "v", false, "Enable verbose output")
+	monitorCmd.Flags().BoolVar(&printer.Hex, "hex", false, "Do not dissect, print payload in HEX")
+	monitorCmd.Flags().VarP(&printer.EventTypes, "type", "t", fmt.Sprintf("Filter by event types %v", monitor.GetAllTypes()))
+	monitorCmd.Flags().Var(&printer.FromSource, "from", "Filter by source endpoint id")
+	monitorCmd.Flags().Var(&printer.ToDst, "to", "Filter by destination endpoint id")
+	monitorCmd.Flags().Var(&printer.Related, "related-to", "Filter by either source or destination endpoint id")
+	monitorCmd.Flags().BoolVarP(&printer.Verbose, "verbose", "v", false, "Enable verbose output")
+	monitorCmd.Flags().BoolVarP(&printer.JSONOutput, "json", "j", false, "Enable json output. Shadows -v flag")
+	monitorCmd.Flags().StringVar(&socketPath, "monitor-socket", "", "Configure monitor socket path")
+	viper.BindEnv("monitor-socket", "CILIUM_MONITOR_SOCK")
+	viper.BindPFlags(monitorCmd.Flags())
 }
-
-var (
-	hex          = false
-	eventTypeIdx = monitor.MessageTypeUnspec // for integer comparison
-	eventType    = ""
-	eventTypes   = map[string]int{
-		"drop":    monitor.MessageTypeDrop,
-		"debug":   monitor.MessageTypeDebug,
-		"capture": monitor.MessageTypeCapture,
-		"trace":   monitor.MessageTypeTrace,
-	}
-	fromSource     = uint16Flags{}
-	toDst          = uint16Flags{}
-	related        = uint16Flags{}
-	verboseMonitor = false
-	verbosity      = INFO
-)
 
 func setVerbosity() {
-	if verboseMonitor {
-		verbosity = DEBUG
+	if printer.JSONOutput {
+		printer.Verbosity = format.JSON
+	} else if printer.Verbose {
+		printer.Verbosity = format.DEBUG
 	} else {
-		verbosity = INFO
+		printer.Verbosity = format.INFO
 	}
-}
-
-func lostEvent(lost uint64, cpu int) {
-	fmt.Printf("CPU %02d: Lost %d events\n", cpu, lost)
-}
-
-// match checks if the event type, from endpoint and / or to endpoint match
-// when they are supplied. The either part of from and to endpoint depends on
-// related to, which can match on both.  If either one of them is less than or
-// equal to zero, then it is assumed user did not use them.
-func match(messageType int, src uint16, dst uint16) bool {
-	if eventTypeIdx != monitor.MessageTypeUnspec && messageType != eventTypeIdx {
-		return false
-	} else if len(fromSource) > 0 && !fromSource.has(src) {
-		return false
-	} else if len(toDst) > 0 && !toDst.has(dst) {
-		return false
-	} else if len(related) > 0 && !related.has(src) && !related.has(dst) {
-		return false
-	}
-
-	return true
-}
-
-// dropEvents prints out all the received drop notifications.
-func dropEvents(prefix string, data []byte) {
-	dn := monitor.DropNotify{}
-
-	if err := binary.Read(bytes.NewReader(data), byteorder.Native, &dn); err != nil {
-		fmt.Printf("Error while parsing drop notification message: %s\n", err)
-	}
-	if match(monitor.MessageTypeDrop, dn.Source, uint16(dn.DstID)) {
-		if verbosity == INFO {
-			dn.DumpInfo(data)
-		} else {
-			fmt.Println(msgSeparator)
-			dn.DumpVerbose(!hex, data, prefix)
-		}
-	}
-}
-
-// traceEvents prints out all the received trace notifications.
-func traceEvents(prefix string, data []byte) {
-	tn := monitor.TraceNotify{}
-
-	if err := binary.Read(bytes.NewReader(data), byteorder.Native, &tn); err != nil {
-		fmt.Printf("Error while parsing trace notification message: %s\n", err)
-	}
-	if match(monitor.MessageTypeTrace, tn.Source, tn.DstID) {
-		if verbosity == INFO {
-			tn.DumpInfo(data)
-		} else {
-			fmt.Println(msgSeparator)
-			tn.DumpVerbose(!hex, data, prefix)
-		}
-	}
-}
-
-// debugEvents prints out all the debug messages.
-func debugEvents(prefix string, data []byte) {
-	dm := monitor.DebugMsg{}
-
-	if err := binary.Read(bytes.NewReader(data), byteorder.Native, &dm); err != nil {
-		fmt.Printf("Error while parsing debug message: %s\n", err)
-	}
-	if match(monitor.MessageTypeDebug, dm.Source, 0) {
-		if verbosity == INFO {
-			dm.DumpInfo(data)
-		} else {
-			dm.Dump(data, prefix)
-		}
-	}
-}
-
-// captureEvents prints out all the capture messages.
-func captureEvents(prefix string, data []byte) {
-	dc := monitor.DebugCapture{}
-
-	if err := binary.Read(bytes.NewReader(data), byteorder.Native, &dc); err != nil {
-		fmt.Printf("Error while parsing debug capture message: %s\n", err)
-	}
-	if match(monitor.MessageTypeCapture, dc.Source, 0) {
-		if verbosity == INFO {
-			dc.DumpInfo(data)
-		} else {
-			fmt.Println(msgSeparator)
-			dc.DumpVerbose(!hex, data, prefix)
-		}
-	}
-}
-
-// logRecordEvents prints out LogRecord events
-func logRecordEvents(prefix string, data []byte) {
-	buf := bytes.NewBuffer(data[1:])
-	dec := gob.NewDecoder(buf)
-
-	lr := monitor.LogRecordNotify{}
-	if err := dec.Decode(&lr); err != nil {
-		fmt.Printf("Error while decoding LogRecord notification message: %s\n", err)
-	}
-
-	lr.DumpInfo()
-}
-
-// agentEvents prints out agent events
-func agentEvents(prefix string, data []byte) {
-	buf := bytes.NewBuffer(data[1:])
-	dec := gob.NewDecoder(buf)
-
-	an := monitor.AgentNotify{}
-	if err := dec.Decode(&an); err != nil {
-		fmt.Printf("Error while decoding agent notification message: %s\n", err)
-	}
-
-	an.DumpInfo()
-}
-
-// receiveEvent forwards all the per CPU events to the appropriate type function.
-func receiveEvent(data []byte, cpu int) {
-	prefix := fmt.Sprintf("CPU %02d:", cpu)
-	messageType := data[0]
-
-	switch messageType {
-	case monitor.MessageTypeDrop:
-		dropEvents(prefix, data)
-	case monitor.MessageTypeDebug:
-		debugEvents(prefix, data)
-	case monitor.MessageTypeCapture:
-		captureEvents(prefix, data)
-	case monitor.MessageTypeTrace:
-		traceEvents(prefix, data)
-	case monitor.MessageTypeAccessLog:
-		logRecordEvents(prefix, data)
-	case monitor.MessageTypeAgent:
-		agentEvents(prefix, data)
-	default:
-		fmt.Printf("%s Unknown event: %+v\n", prefix, data)
-	}
-}
-
-// validateEventTypeFilter does some input validation to give the user feedback if they
-// wrote something close that did not match for example 'srop' instead of
-// 'drop'.
-func validateEventTypeFilter() {
-	i, err := eventTypes[eventType]
-	if !err {
-		err := "Unknown type (%s). Please use one of the following ones %v\n"
-		fmt.Printf(err, eventType, listEventTypes())
-		os.Exit(1)
-	}
-	eventTypeIdx = i
 }
 
 func setupSigHandler() {
@@ -314,7 +92,175 @@ func setupSigHandler() {
 	}()
 }
 
-func runMonitor() {
+// openMonitorSock attempts to open a version specific monitor socket It
+// returns a connection, with a version, or an error.
+func openMonitorSock(path string) (conn net.Conn, version listener.Version, err error) {
+	errors := make([]string, 0)
+
+	// try the user-provided socket
+	if path != "" {
+		conn, err = net.Dial("unix", path)
+		if err == nil {
+			version = listener.Version1_2
+			if strings.HasSuffix(path, "monitor.sock") {
+				version = listener.Version1_0
+			}
+			return conn, version, nil
+		}
+		errors = append(errors, path+": "+err.Error())
+	}
+
+	// try the 1.2 socket
+	conn, err = net.Dial("unix", defaults.MonitorSockPath1_2)
+	if err == nil {
+		return conn, listener.Version1_2, nil
+	}
+	errors = append(errors, defaults.MonitorSockPath1_2+": "+err.Error())
+
+	// try the 1.1 socket
+	conn, err = net.Dial("unix", defaults.MonitorSockPath1_0)
+	if err == nil {
+		return conn, listener.Version1_0, nil
+	}
+	errors = append(errors, defaults.MonitorSockPath1_0+": "+err.Error())
+
+	return nil, listener.VersionUnsupported, fmt.Errorf("Cannot find or open a supported node-monitor socket. %s", strings.Join(errors, ","))
+}
+
+// consumeMonitorEvents handles and prints events on a monitor connection. It
+// calls getMonitorParsed to construct a monitor-version appropriate parser.
+// It closes conn on return, and returns on error, including io.EOF
+func consumeMonitorEvents(conn net.Conn, version listener.Version) error {
+	defer conn.Close()
+
+	getParsedPayload, err := getMonitorParser(conn, version)
+	if err != nil {
+		return err
+	}
+
+	for {
+		pl, err := getParsedPayload()
+		if err != nil {
+			return err
+		}
+		if !printer.FormatEvent(pl) {
+			// earlier code used an else to handle this case, along with pl.Type ==
+			// payload.RecordLost above. It should be safe to call lostEvent to match
+			// the earlier behaviour, despite it not being wholly correct.
+			log.WithError(err).WithField("type", pl.Type).Warn("Unknown payload type")
+			format.LostEvent(pl.Lost, pl.CPU)
+		}
+	}
+}
+
+// eventParseFunc is a convenience function type used as a version-specific
+// parser of monitor events
+type eventParserFunc func() (*payload.Payload, error)
+
+// getMonitorParser constructs and returns an eventParserFunc. It is
+// appropriate for the monitor API version passed in.
+func getMonitorParser(conn net.Conn, version listener.Version) (parser eventParserFunc, err error) {
+	switch version {
+	case listener.Version1_0:
+		var (
+			meta payload.Meta
+			pl   payload.Payload
+		)
+		// This implements the older API. Always encode a Meta and Payload object,
+		// both with full gob type information
+		return func() (*payload.Payload, error) {
+			if err := payload.ReadMetaPayload(conn, &meta, &pl); err != nil {
+				return nil, err
+			}
+			return &pl, nil
+		}, nil
+
+	case listener.Version1_2:
+		var (
+			pl  payload.Payload
+			dec = gob.NewDecoder(conn)
+		)
+		// This implemenents the newer 1.2 API. Each listener maintains its own gob
+		// session, and type information is only ever sent once.
+		return func() (*payload.Payload, error) {
+			if err := pl.DecodeBinary(dec); err != nil {
+				return nil, err
+			}
+			return &pl, nil
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported version %s", version)
+	}
+}
+
+func endpointsExist(endpoints format.Uint16Flags, existingEndpoints []*models.Endpoint) bool {
+
+	endpointsFound := format.Uint16Flags{}
+	for _, ep := range existingEndpoints {
+		if endpoints.Has(uint16(ep.ID)) {
+			endpointsFound = append(endpointsFound, uint16(ep.ID))
+		}
+	}
+
+	if len(endpointsFound) < len(endpoints) {
+		for _, endpoint := range endpoints {
+			if !endpointsFound.Has(endpoint) {
+				fmt.Fprintf(os.Stderr, "endpoint %d not found\n", endpoint)
+			}
+		}
+	}
+
+	if len(endpointsFound) == 0 {
+		return false
+	}
+
+	return true
+}
+
+func validateEndpointsFilters() {
+	if !(len(printer.FromSource) > 0) ||
+		!(len(printer.ToDst) > 0) ||
+		!(len(printer.Related) > 0) {
+		return
+	}
+
+	existingEndpoints, err := client.EndpointList()
+	if err != nil {
+		Fatalf("cannot get endpoint list: %s\n", err)
+	}
+
+	validFilter := false
+	if len(printer.FromSource) > 0 {
+		if endpointsExist(printer.FromSource, existingEndpoints) {
+			validFilter = true
+		}
+	}
+	if len(printer.ToDst) > 0 {
+		if endpointsExist(printer.ToDst, existingEndpoints) {
+			validFilter = true
+		}
+	}
+
+	if len(printer.Related) > 0 {
+		if endpointsExist(printer.Related, existingEndpoints) {
+			validFilter = true
+		}
+	}
+
+	// exit if all filters are not not found
+	if !validFilter {
+		os.Exit(1)
+	}
+}
+
+func runMonitor(args []string) {
+	if len(args) > 0 {
+		fmt.Println("Error: arguments not recognized")
+		os.Exit(1)
+	}
+
+	validateEndpointsFilters()
 	setVerbosity()
 	setupSigHandler()
 	if resp, err := client.Daemon.GetHealthz(nil); err == nil {
@@ -324,38 +270,28 @@ func runMonitor() {
 		}
 	}
 	fmt.Printf("Press Ctrl-C to quit\n")
-start:
-	conn, err := net.Dial("unix", defaults.MonitorSockPath)
-	if err != nil {
-		fmt.Printf("Error: unable to connect to monitor %s\n", err)
-		os.Exit(1)
-	}
 
-	defer conn.Close()
-
-	if eventType != "" {
-		validateEventTypeFilter()
-	}
-
-	var meta payload.Meta
-	var pl payload.Payload
-	for {
-		if err := payload.ReadMetaPayload(conn, &meta, &pl); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// EOF may be due to invalid payload size. Close the connection just in case.
-				conn.Close()
-				log.WithError(err).Warn("connection closed")
-				time.Sleep(connTimeout)
-				goto start
-			} else {
-				log.WithError(err).Fatal("decoding error")
-			}
+	// On EOF, retry
+	// On other errors, exit
+	// always wait connTimeout when retrying
+	for ; ; time.Sleep(connTimeout) {
+		conn, version, err := openMonitorSock(viper.GetString("monitor-socket"))
+		if err != nil {
+			log.WithError(err).Error("Cannot open monitor socket")
+			return
 		}
 
-		if pl.Type == payload.EventSample {
-			receiveEvent(pl.Data, pl.CPU)
-		} else /* if pl.Type == payload.RecordLost */ {
-			lostEvent(pl.Lost, pl.CPU)
+		err = consumeMonitorEvents(conn, version)
+		switch {
+		case err == nil:
+		// no-op
+
+		case err == io.EOF, err == io.ErrUnexpectedEOF:
+			log.WithError(err).Warn("connection closed")
+			continue
+
+		default:
+			log.WithError(err).Fatal("decoding error")
 		}
 	}
 }

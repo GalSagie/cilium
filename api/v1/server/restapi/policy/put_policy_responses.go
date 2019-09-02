@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // PutPolicyOKCode is the HTTP code returned for type PutPolicyOK
@@ -30,6 +30,7 @@ type PutPolicyOK struct {
 
 // NewPutPolicyOK creates PutPolicyOK with default headers values
 func NewPutPolicyOK() *PutPolicyOK {
+
 	return &PutPolicyOK{}
 }
 
@@ -73,6 +74,7 @@ type PutPolicyInvalidPolicy struct {
 
 // NewPutPolicyInvalidPolicy creates PutPolicyInvalidPolicy with default headers values
 func NewPutPolicyInvalidPolicy() *PutPolicyInvalidPolicy {
+
 	return &PutPolicyInvalidPolicy{}
 }
 
@@ -95,7 +97,6 @@ func (o *PutPolicyInvalidPolicy) WriteResponse(rw http.ResponseWriter, producer 
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // PutPolicyInvalidPathCode is the HTTP code returned for type PutPolicyInvalidPath
@@ -115,6 +116,7 @@ type PutPolicyInvalidPath struct {
 
 // NewPutPolicyInvalidPath creates PutPolicyInvalidPath with default headers values
 func NewPutPolicyInvalidPath() *PutPolicyInvalidPath {
+
 	return &PutPolicyInvalidPath{}
 }
 
@@ -137,7 +139,6 @@ func (o *PutPolicyInvalidPath) WriteResponse(rw http.ResponseWriter, producer ru
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // PutPolicyFailureCode is the HTTP code returned for type PutPolicyFailure
@@ -157,6 +158,7 @@ type PutPolicyFailure struct {
 
 // NewPutPolicyFailure creates PutPolicyFailure with default headers values
 func NewPutPolicyFailure() *PutPolicyFailure {
+
 	return &PutPolicyFailure{}
 }
 
@@ -179,5 +181,4 @@ func (o *PutPolicyFailure) WriteResponse(rw http.ResponseWriter, producer runtim
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }

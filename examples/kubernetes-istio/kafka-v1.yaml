@@ -68,13 +68,15 @@ spec:
   replicas: 1
   template:
     metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"
       labels:
         app: kafka
         version: v1
     spec:
       containers:
       - name:  kafka
-        image: spotify/kafka:latest
+        image: docker.io/spotify/kafka:latest
         ports:
         - containerPort: 9092
           name: kafka

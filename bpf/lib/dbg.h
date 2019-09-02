@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2017 Authors of Cilium
+ *  Copyright (C) 2016-2019 Authors of Cilium
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -46,12 +46,16 @@ enum {
 	DBG_LB6_LOOKUP_MASTER_FAIL,
 	DBG_LB6_LOOKUP_SLAVE,
 	DBG_LB6_LOOKUP_SLAVE_SUCCESS,
+	DBG_LB6_LOOKUP_SLAVE_V2_FAIL,
+	DBG_LB6_LOOKUP_BACKEND_FAIL,
 	DBG_LB6_REVERSE_NAT_LOOKUP,
 	DBG_LB6_REVERSE_NAT,
 	DBG_LB4_LOOKUP_MASTER,
 	DBG_LB4_LOOKUP_MASTER_FAIL,
 	DBG_LB4_LOOKUP_SLAVE,
 	DBG_LB4_LOOKUP_SLAVE_SUCCESS,
+	DBG_LB4_LOOKUP_SLAVE_V2_FAIL,
+	DBG_LB4_LOOKUP_BACKEND_FAIL,
 	DBG_LB4_REVERSE_NAT_LOOKUP,
 	DBG_LB4_REVERSE_NAT,
 	DBG_LB4_LOOPBACK_SNAT,
@@ -72,7 +76,7 @@ enum {
 				 * arg2: direction
 				 * arg3: unused
 				 */
-	DBG_CT_CREATED4,        /* arg1: (proxy_port << 16) | rev_nat_index
+	DBG_CT_CREATED4,        /* arg1: (unused << 16) | rev_nat_index
 				 * arg2: src sec-id
 				 * arg3: lb address
 				 */ 
@@ -84,7 +88,7 @@ enum {
 				 * arg2: direction
 				 * arg3: unused
 				 */
-	DBG_CT_CREATED6,        /* arg1: (proxy_port << 16) | rev_nat_index
+	DBG_CT_CREATED6,        /* arg1: (unused << 16) | rev_nat_index
 				 * arg2: src sec-id
 				 * arg3: unused
 				 */
@@ -95,6 +99,23 @@ enum {
 				 * arg2: dst sec-id
 				 * arg3: (dport << 16) | protocol
 				 */
+	DBG_IP_ID_MAP_FAILED4,	/* arg1: daddr
+				 * arg2: unused
+				 * arg3: unused */
+	DBG_IP_ID_MAP_FAILED6,	/* arg1: daddr (last 4 bytes)
+				 * arg2: unused
+				 * arg3: unused */
+	DBG_IP_ID_MAP_SUCCEED4,	/* arg1: daddr
+				 * arg2: identity
+				 * arg3: unused */
+	DBG_IP_ID_MAP_SUCCEED6,	/* arg1: daddr (last 4 bytes)
+				 * arg2: identity
+				 * arg3: unused */
+	DBG_LB_STALE_CT,	/* arg1: svc rev_nat_id
+				   arg2: stale CT rev_nat_id
+				   arg3: unused */
+	DBG_INHERIT_IDENTITY	/* arg1: skb->mark
+				 * arg2: unused */
 };
 
 /* Capture types */
@@ -109,6 +130,8 @@ enum {
 	DBG_CAPTURE_AFTER_V64,
 	DBG_CAPTURE_PROXY_PRE,
 	DBG_CAPTURE_PROXY_POST,
+	DBG_CAPTURE_SNAT_PRE,
+	DBG_CAPTURE_SNAT_POST,
 };
 
 #ifndef EVENT_SOURCE
@@ -148,7 +171,7 @@ static inline void cilium_dbg(struct __sk_buff *skb, __u8 type, __u32 arg1, __u3
 		.arg2 = arg2,
 	};
 
-	skb_event_output(skb, &cilium_events, BPF_F_CURRENT_CPU, &msg, sizeof(msg));
+	skb_event_output(skb, &EVENTS_MAP, BPF_F_CURRENT_CPU, &msg, sizeof(msg));
 }
 
 static inline void cilium_dbg3(struct __sk_buff *skb, __u8 type, __u32 arg1,
@@ -165,7 +188,7 @@ static inline void cilium_dbg3(struct __sk_buff *skb, __u8 type, __u32 arg1,
 		.arg3 = arg3,
 	};
 
-	skb_event_output(skb, &cilium_events, BPF_F_CURRENT_CPU, &msg, sizeof(msg));
+	skb_event_output(skb, &EVENTS_MAP, BPF_F_CURRENT_CPU, &msg, sizeof(msg));
 }
 
 struct debug_capture_msg {
@@ -191,7 +214,7 @@ static inline void cilium_dbg_capture2(struct __sk_buff *skb, __u8 type, __u32 a
 		.arg2 = arg2,
 	};
 
-	skb_event_output(skb, &cilium_events,
+	skb_event_output(skb, &EVENTS_MAP,
 			 (cap_len << 32) | BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 }

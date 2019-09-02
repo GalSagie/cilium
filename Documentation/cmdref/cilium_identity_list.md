@@ -2,22 +2,22 @@
 
 ## cilium identity list
 
-List all identities
+List identities
 
 ### Synopsis
 
-
-List all identities
+List identities
 
 ```
-cilium identity list
+cilium identity list [LABELS] [flags]
 ```
 
 ### Options
 
 ```
+      --endpoints       list identities of locally managed endpoints
+  -h, --help            help for list
   -o, --output string   json| jsonpath='{}'
-      --reserved        List all reserved identities
 ```
 
 ### Options inherited from parent commands
@@ -29,5 +29,6 @@ cilium identity list
 ```
 
 ### SEE ALSO
-* [cilium identity](cilium_identity.html)	 - Manage security identities
+
+* [cilium identity](../cilium_identity)	 - Manage security identities
 

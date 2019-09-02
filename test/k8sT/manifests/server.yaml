@@ -2,6 +2,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: app{{.Index}}-service
+  labels:
+    zgroup: testapp
 spec:
   ports:
   - port: 80
@@ -18,7 +20,8 @@ metadata:
 spec:
   containers:
   - name: web
-    image: cilium/connectivity-container:v1.0
+    image: docker.io/cilium/connectivity-container:v1.0
+    imagePullPolicy: IfNotPresent
     ports:
     - containerPort: 80
     volumeMounts:

@@ -14,12 +14,23 @@
 
 package config
 
-import "flag"
+import (
+	"flag"
+	"time"
+)
 
 // CiliumTestConfigType holds all of the configurable elements of the testsuite
 type CiliumTestConfigType struct {
-	Reprovision     bool
-	HoldEnvironment bool
+	Reprovision         bool
+	HoldEnvironment     bool
+	SSHConfig           string
+	ShowCommands        bool
+	TestScope           string
+	SkipLogGathering    bool
+	CiliumImage         string
+	CiliumOperatorImage string
+	ProvisionK8s        bool
+	Timeout             time.Duration
 }
 
 // CiliumTestConfig holds the global configuration of commandline flags
@@ -32,4 +43,20 @@ func (c *CiliumTestConfigType) ParseFlags() {
 		"Provision Vagrant boxes and Cilium before running test")
 	flag.BoolVar(&c.HoldEnvironment, "cilium.holdEnvironment", false,
 		"On failure, hold the environment in its current state")
+	flag.BoolVar(&c.SkipLogGathering, "cilium.skipLogs", false,
+		"skip gathering logs if a test fails")
+	flag.StringVar(&c.SSHConfig, "cilium.SSHConfig", "",
+		"Specify a custom command to fetch SSH configuration (eg: 'vagrant ssh-config')")
+	flag.BoolVar(&c.ShowCommands, "cilium.showCommands", false,
+		"Output which commands are ran to stdout")
+	flag.StringVar(&c.TestScope, "cilium.testScope", "",
+		"Specifies scope of test to be ran (k8s, Nightly, runtime)")
+	flag.StringVar(&c.CiliumImage, "cilium.image", "",
+		"Specifies which image of cilium to use during tests")
+	flag.StringVar(&c.CiliumOperatorImage, "cilium.operator-image", "",
+		"Specifies which image of cilium-operator to use during tests")
+	flag.BoolVar(&c.ProvisionK8s, "cilium.provision-k8s", true,
+		"Specifies whether Kubernetes should be deployed and installed via kubeadm or not")
+	flag.DurationVar(&c.Timeout, "cilium.timeout", 24*time.Hour,
+		"Specifies timeout for test run")
 }

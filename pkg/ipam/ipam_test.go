@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package ipam
 
 import (
+	"net"
 	"testing"
 
 	"github.com/cilium/cilium/common/addressing"
-	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/checker"
+	"github.com/cilium/cilium/pkg/datapath/fake"
 
 	. "gopkg.in/check.v1"
 )
@@ -32,33 +36,73 @@ type IPAMSuite struct{}
 var _ = Suite(&IPAMSuite{})
 
 func (s *IPAMSuite) TestLock(c *C) {
-	node.InitDefaultPrefix("")
-	err := Init()
-	c.Assert(err, IsNil)
+	fakeAddressing := fake.NewNodeAddressing()
+	ipam := NewIPAM(fakeAddressing, Configuration{EnableIPv4: true, EnableIPv6: true}, &ownerMock{})
 
 	// Since the IPs we have allocated to the endpoints might or might not
 	// be in the allocrange specified in cilium, we need to specify them
 	// manually on the endpoint based on the alloc range.
-	ipv4 := node.GetIPv4AllocRange().IP
+	ipv4 := fakeAddressing.IPv4().AllocationCIDR().IP
 	nextIP(ipv4)
 	epipv4, err := addressing.NewCiliumIPv4(ipv4.String())
 	c.Assert(err, IsNil)
 
-	ipv6 := node.GetIPv6AllocRange().IP
+	ipv6 := fakeAddressing.IPv6().AllocationCIDR().IP
 	nextIP(ipv6)
 	epipv6, err := addressing.NewCiliumIPv6(ipv6.String())
 	c.Assert(err, IsNil)
 
 	// Forcefully release possible allocated IPs
-	err = ipamConf.IPv4Allocator.Release(epipv4.IP())
+	err = ipam.IPv4Allocator.Release(epipv4.IP())
 	c.Assert(err, IsNil)
-	err = ipamConf.IPv6Allocator.Release(epipv6.IP())
+	err = ipam.IPv6Allocator.Release(epipv6.IP())
 	c.Assert(err, IsNil)
 
 	// Let's allocate the IP first so we can see the tests failing
-	err = ipamConf.IPv4Allocator.Allocate(epipv4.IP())
+	result, err := ipam.IPv4Allocator.Allocate(epipv4.IP(), "test")
 	c.Assert(err, IsNil)
+	c.Assert(result.IP, checker.DeepEquals, epipv4.IP())
 
-	err = ipamConf.IPv4Allocator.Release(epipv4.IP())
+	err = ipam.IPv4Allocator.Release(epipv4.IP())
 	c.Assert(err, IsNil)
+}
+
+func (s *IPAMSuite) TestBlackList(c *C) {
+	fakeAddressing := fake.NewNodeAddressing()
+	ipam := NewIPAM(fakeAddressing, Configuration{EnableIPv4: true, EnableIPv6: true}, &ownerMock{})
+
+	// force copy of first possible IP in allocation range
+	ipv4 := net.ParseIP(fakeAddressing.IPv4().AllocationCIDR().IP.String())
+	nextIP(ipv4)
+
+	ipam.BlacklistIP(ipv4, "test")
+	err := ipam.AllocateIP(ipv4, "test")
+	c.Assert(err, Not(IsNil))
+	ipam.ReleaseIP(ipv4)
+
+	nextIP(ipv4)
+	_, ipNet, err := net.ParseCIDR(fakeAddressing.IPv4().AllocationCIDR().String())
+	c.Assert(err, IsNil)
+	ipam.BlacklistIPNet(*ipNet, "test")
+	c.Assert(ipam.blacklist.Contains(ipv4), Equals, true)
+
+	// force copy of first possible IP in allocation range
+	ipv6 := net.ParseIP(fakeAddressing.IPv6().AllocationCIDR().IP.String())
+	nextIP(ipv6)
+
+	ipam.BlacklistIP(ipv6, "test")
+	err = ipam.AllocateIP(ipv6, "test")
+	c.Assert(err, Not(IsNil))
+	ipam.ReleaseIP(ipv6)
+
+	nextIP(ipv6)
+	_, ipNet, err = net.ParseCIDR(fakeAddressing.IPv6().AllocationCIDR().String())
+	c.Assert(err, IsNil)
+	ipam.BlacklistIPNet(*ipNet, "test")
+	c.Assert(ipam.blacklist.Contains(ipv6), Equals, true)
+}
+
+func (s *IPAMSuite) TestDeriveFamily(c *C) {
+	c.Assert(DeriveFamily(net.ParseIP("1.1.1.1")), Equals, IPv4)
+	c.Assert(DeriveFamily(net.ParseIP("f00d::1")), Equals, IPv6)
 }

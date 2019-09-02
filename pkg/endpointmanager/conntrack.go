@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2018 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,158 +16,128 @@ package endpointmanager
 
 import (
 	"fmt"
-	"net"
-	"strconv"
+	"os"
 	"time"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
-	"github.com/cilium/cilium/pkg/policy"
 
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	// GcInterval is the garbage collection interval.
-	// #FIXME find a way to change this value otherwise we'll have lots of tests flakes
-	// Change to be a flag
-	GcInterval int = 10
-)
-
-// RunGC run CT's garbage collector for the given endpoint. `isLocal` refers if
+// runGC run CT's garbage collector for the given endpoint. `isLocal` refers if
 // the CT map is set to local. If `isIPv6` is set specifies that is the IPv6
 // map. `filter` represents the filter type to be used while looping all CT
 // entries.
-func RunGC(e *endpoint.Endpoint, isLocal, isIPv6 bool, filter *ctmap.GCFilter) {
-	var file string
-	var mapType string
-	// TODO: We need to optimize this a bit in future, so we traverse
-	// the global table less often.
+//
+// The provided endpoint is optional; if it is provided, then its map will be
+// garbage collected and any failures will be logged to the endpoint log.
+// Otherwise it will garbage-collect the global map and use the global log.
+func (epMgr *EndpointManager) runGC(e *endpoint.Endpoint, ipv4, ipv6 bool, filter *ctmap.GCFilter) (mapType bpf.MapType, maxDeleteRatio float64) {
+	var maps []*ctmap.Map
 
-	// Use local or global conntrack maps depending on configuration settings.
-	if isLocal {
-		if isIPv6 {
-			mapType = ctmap.MapName6
-		} else {
-			mapType = ctmap.MapName4
-		}
-		file = bpf.MapPath(mapType + strconv.Itoa(int(e.ID)))
+	if e == nil {
+		maps = ctmap.GlobalMaps(ipv4, ipv6)
 	} else {
-		if isIPv6 {
-			mapType = ctmap.MapName6Global
-		} else {
-			mapType = ctmap.MapName4Global
+		maps = ctmap.LocalMaps(e, ipv4, ipv6)
+	}
+	for _, m := range maps {
+		path, err := m.Path()
+		if err == nil {
+			err = m.Open()
 		}
-		file = bpf.MapPath(mapType)
+		if err != nil {
+			msg := "Skipping CT garbage collection"
+			scopedLog := log.WithError(err).WithField(logfields.Path, path)
+			if os.IsNotExist(err) {
+				scopedLog.Debug(msg)
+			} else {
+				scopedLog.Warn(msg)
+			}
+			if e != nil {
+				e.LogStatus(endpoint.BPF, endpoint.Warning, fmt.Sprintf("%s: %s", msg, err))
+			}
+			continue
+		}
+		defer m.Close()
+
+		mapType = m.MapInfo.MapType
+
+		deleted := ctmap.GC(m, filter)
+
+		if deleted > 0 {
+			ratio := float64(deleted) / float64(m.MapInfo.MaxEntries)
+			if ratio > maxDeleteRatio {
+				maxDeleteRatio = ratio
+			}
+			log.WithFields(logrus.Fields{
+				logfields.Path: path,
+				"count":        deleted,
+			}).Debug("Deleted filtered entries from map")
+		}
 	}
 
-	m, err := bpf.OpenMap(file)
-	if err != nil {
-		log.WithError(err).WithField(logfields.Path, file).Warn("Unable to open map")
-		e.LogStatus(endpoint.BPF, endpoint.Warning, fmt.Sprintf("Unable to open CT map %s: %s", file, err))
-		return
-	}
-	defer m.Close()
+	return
+}
 
-	deleted := ctmap.GC(m, mapType, filter)
-
-	if deleted > 0 {
-		log.WithFields(logrus.Fields{
-			logfields.Path:  file,
-			"ctFilter.type": filter.TypeString(),
-			"count":         deleted,
-		}).Debug("Deleted filtered entries from map")
+func createGCFilter(initialScan bool, restoredEndpoints []*endpoint.Endpoint) *ctmap.GCFilter {
+	filter := &ctmap.GCFilter{
+		RemoveExpired: true,
 	}
+
+	// On the initial scan, scrub all IPs from the conntrack table which do
+	// not belong to IPs of any endpoint that has been restored. No new
+	// endpoints can appear yet so we can assume that any other entry not
+	// belonging to a restored endpoint has become stale.
+	if initialScan {
+		filter.ValidIPs = map[string]struct{}{}
+		for _, ep := range restoredEndpoints {
+			filter.ValidIPs[ep.IPv6.String()] = struct{}{}
+			filter.ValidIPs[ep.IPv4.String()] = struct{}{}
+		}
+	}
+
+	return filter
 }
 
 // EnableConntrackGC enables the connection tracking garbage collection.
-func EnableConntrackGC(ipv4, ipv6 bool) {
-	go func() {
-		seenGlobal := false
-		sleepTime := time.Duration(GcInterval) * time.Second
-		for {
-			eps := GetEndpoints()
-			for _, e := range eps {
-				e.Mutex.RLock()
+func (epMgr *EndpointManager) EnableConntrackGC(ipv4, ipv6 bool, restoredEndpoints []*endpoint.Endpoint) {
+	var (
+		initialScan         = true
+		initialScanComplete = make(chan struct{})
+		mapType             bpf.MapType
+	)
 
-				if e.Consumable == nil {
-					e.Mutex.RUnlock()
+	go func() {
+		for {
+			var maxDeleteRatio float64
+			eps := epMgr.GetEndpoints()
+			if len(eps) > 0 || initialScan {
+				mapType, maxDeleteRatio = epMgr.runGC(nil, ipv4, ipv6, createGCFilter(initialScan, restoredEndpoints))
+			}
+			for _, e := range eps {
+				if !e.ConntrackLocal() {
+					// Skip because GC was handled above.
 					continue
 				}
-
-				// Only process global CT once per round.
-				// We don't really care about which EP
-				// triggers the traversal as long as we do
-				// traverse it eventually. Update/delete
-				// combo only serialized done from here,
-				// so no extra mutex for global CT needed
-				// right now. We still need to traverse
-				// other EPs since some may not be part
-				// of the global CT, but have a local one.
-				isLocal := e.Opts.IsEnabled(endpoint.OptionConntrackLocal)
-				if isLocal == false {
-					if seenGlobal == true {
-						e.Mutex.RUnlock()
-						continue
-					}
-					seenGlobal = true
-				}
-
-				e.Mutex.RUnlock()
-				// We can unlock the endpoint mutex sense
-				// in runGC it will be locked as needed.
-				if ipv6 {
-					RunGC(e, isLocal, true, ctmap.NewGCFilterBy(ctmap.GCFilterByTime))
-				}
-				if ipv4 {
-					RunGC(e, isLocal, false, ctmap.NewGCFilterBy(ctmap.GCFilterByTime))
-				}
+				epMgr.runGC(e, ipv4, ipv6, &ctmap.GCFilter{RemoveExpired: true})
 			}
-			time.Sleep(sleepTime)
-			seenGlobal = false
+
+			if initialScan {
+				close(initialScanComplete)
+				initialScan = false
+			}
+
+			time.Sleep(ctmap.GetInterval(mapType, maxDeleteRatio))
 		}
 	}()
-}
 
-// ResetProxyPort modifies the connection tracking table of the given endpoint
-// `e`. It modifies all CT entries that of the CT table local or global, defined
-// by isLocal, that contain:
-//  - all the IP addresses given in the ips slice AND
-//  - any of the given ids in the idsMod map, maps to true and matches the
-//    src_sec_id in the CT table.
-func ResetProxyPort(ipv4Enabled bool, e *endpoint.Endpoint, isLocal bool, ips []net.IP, idsMod policy.SecurityIDContexts) {
-
-	gcFilter := ctmap.NewGCFilterBy(ctmap.GCFilterByIDToMod)
-	gcFilter.IDsToMod = idsMod
-	for _, ip := range ips {
-		gcFilter.IP = ip
-
-		if ip.To4() == nil {
-			RunGC(e, isLocal, true, gcFilter)
-		} else if ipv4Enabled {
-			RunGC(e, isLocal, false, gcFilter)
-		}
-	}
-}
-
-// FlushCTEntriesOf cleans the connection tracking table of the given endpoint
-// `e`. It removes all CT entries that of the CT table local or global, defined
-// by isLocal, that contains:
-//  - all the IP addresses given in the ips slice AND
-//  - does not belong to the list of ids to keep
-func FlushCTEntriesOf(ipv4Enabled bool, e *endpoint.Endpoint, isLocal bool, ips []net.IP, idsToKeep policy.SecurityIDContexts) {
-
-	gcFilter := ctmap.NewGCFilterBy(ctmap.GCFilterByIDsToKeep)
-	gcFilter.IDsToKeep = idsToKeep
-	for _, ip := range ips {
-		gcFilter.IP = ip
-
-		if ip.To4() == nil {
-			RunGC(e, isLocal, true, gcFilter)
-		} else if ipv4Enabled {
-			RunGC(e, isLocal, false, gcFilter)
-		}
+	select {
+	case <-initialScanComplete:
+		log.Info("Initial scan of connection tracking completed")
+	case <-time.After(30 * time.Second):
+		log.Fatal("Timeout while waiting for initial conntrack scan")
 	}
 }

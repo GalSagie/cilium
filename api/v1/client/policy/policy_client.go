@@ -25,6 +25,39 @@ type Client struct {
 }
 
 /*
+DeleteFqdnCache deletes matching DNS lookups from the policy generation cache
+
+Deletes matching DNS lookups from the cache, optionally restricted by
+DNS name. The removed IP data will no longer be used in generated
+policies.
+
+*/
+func (a *Client) DeleteFqdnCache(params *DeleteFqdnCacheParams) (*DeleteFqdnCacheOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewDeleteFqdnCacheParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "DeleteFqdnCache",
+		Method:             "DELETE",
+		PathPattern:        "/fqdn/cache",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &DeleteFqdnCacheReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*DeleteFqdnCacheOK), nil
+
+}
+
+/*
 DeletePolicy deletes a policy sub tree
 */
 func (a *Client) DeletePolicy(params *DeletePolicyParams) (*DeletePolicyOK, error) {
@@ -49,6 +82,70 @@ func (a *Client) DeletePolicy(params *DeletePolicyParams) (*DeletePolicyOK, erro
 		return nil, err
 	}
 	return result.(*DeletePolicyOK), nil
+
+}
+
+/*
+GetFqdnCache retrieves the list of DNS lookups intercepted from all endpoints
+
+Retrieves the list of DNS lookups intercepted from endpoints,
+optionally filtered by endpoint id, DNS name, or CIDR IP range.
+
+*/
+func (a *Client) GetFqdnCache(params *GetFqdnCacheParams) (*GetFqdnCacheOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetFqdnCacheParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetFqdnCache",
+		Method:             "GET",
+		PathPattern:        "/fqdn/cache",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetFqdnCacheReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetFqdnCacheOK), nil
+
+}
+
+/*
+GetFqdnCacheID retrieves the list of DNS lookups intercepted from an endpoint
+
+Retrieves the list of DNS lookups intercepted from endpoints,
+optionally filtered by endpoint id, DNS name, or CIDR IP range.
+
+*/
+func (a *Client) GetFqdnCacheID(params *GetFqdnCacheIDParams) (*GetFqdnCacheIDOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetFqdnCacheIDParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetFqdnCacheID",
+		Method:             "GET",
+		PathPattern:        "/fqdn/cache/{id}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetFqdnCacheIDReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetFqdnCacheIDOK), nil
 
 }
 
@@ -80,6 +177,34 @@ func (a *Client) GetIdentity(params *GetIdentityParams) (*GetIdentityOK, error) 
 		return nil, err
 	}
 	return result.(*GetIdentityOK), nil
+
+}
+
+/*
+GetIdentityEndpoints retrieves identities which are being used by local endpoints
+*/
+func (a *Client) GetIdentityEndpoints(params *GetIdentityEndpointsParams) (*GetIdentityEndpointsOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetIdentityEndpointsParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetIdentityEndpoints",
+		Method:             "GET",
+		PathPattern:        "/identity/endpoints",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetIdentityEndpointsReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetIdentityEndpointsOK), nil
 
 }
 
@@ -167,6 +292,34 @@ func (a *Client) GetPolicyResolve(params *GetPolicyResolveParams) (*GetPolicyRes
 		return nil, err
 	}
 	return result.(*GetPolicyResolveOK), nil
+
+}
+
+/*
+GetPolicySelectors sees what selectors match which identities
+*/
+func (a *Client) GetPolicySelectors(params *GetPolicySelectorsParams) (*GetPolicySelectorsOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewGetPolicySelectorsParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetPolicySelectors",
+		Method:             "GET",
+		PathPattern:        "/policy/selectors",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetPolicySelectorsReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetPolicySelectorsOK), nil
 
 }
 

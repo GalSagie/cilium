@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,27 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package main
 
 import (
+	"context"
 	"io/ioutil"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cilium/cilium/common"
-	"github.com/cilium/cilium/daemon/options"
-	e "github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/completion"
+	"github.com/cilium/cilium/pkg/datapath"
+	fakedatapath "github.com/cilium/cilium/pkg/datapath/fake"
+	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/endpoint/regeneration"
+	"github.com/cilium/cilium/pkg/endpointmanager"
+	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/monitor"
+	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
+	"github.com/cilium/cilium/pkg/revert"
 
 	. "gopkg.in/check.v1"
 )
@@ -43,74 +53,119 @@ func Test(t *testing.T) { TestingT(t) }
 type DaemonSuite struct {
 	d *Daemon
 
+	// oldPolicyEnabled is the policy enforcement mode that was set before the test,
+	// as returned by policy.GetPolicyEnabled().
+	oldPolicyEnabled string
+
 	kvstoreInit bool
 
 	// Owners interface mock
-	OnTracingEnabled                  func() bool
-	OnDryModeEnabled                  func() bool
-	OnEnableEndpointPolicyEnforcement func(e *e.Endpoint) (bool, bool)
-	OnPolicyEnforcement               func() string
-	OnAlwaysAllowLocalhost            func() bool
-	OnGetCachedLabelList              func(id policy.NumericIdentity) (labels.LabelArray, error)
-	OnGetPolicyRepository             func() *policy.Repository
-	OnUpdateProxyRedirect             func(e *e.Endpoint, l4 *policy.L4Filter) (uint16, error)
-	OnRemoveProxyRedirect             func(e *e.Endpoint, id string) error
-	OnGetStateDir                     func() string
-	OnGetBpfDir                       func() string
-	OnGetTunnelMode                   func() string
-	OnQueueEndpointBuild              func(r *e.Request)
-	OnRemoveFromEndpointQueue         func(epID uint64)
-	OnDebugEnabled                    func() bool
-	OnGetCompilationLock              func() *lock.RWMutex
-	OnResetProxyPort                  func(e *e.Endpoint, isCTLocal bool, ips []net.IP, idsToMod policy.SecurityIDContexts)
-	OnFlushCTEntries                  func(e *e.Endpoint, isCTLocal bool, ips []net.IP, idsToKeep policy.SecurityIDContexts)
-	OnSendNotification                func(typ monitor.AgentNotification, text string) error
-	OnNewProxyLogRecord               func(l *accesslog.LogRecord) error
+	OnTracingEnabled          func() bool
+	OnAlwaysAllowLocalhost    func() bool
+	OnGetCachedLabelList      func(id identity.NumericIdentity) (labels.LabelArray, error)
+	OnGetPolicyRepository     func() *policy.Repository
+	OnUpdateProxyRedirect     func(e regeneration.EndpointUpdater, l4 *policy.L4Filter, proxyWaitGroup *completion.WaitGroup) (uint16, error, revert.FinalizeFunc, revert.RevertFunc)
+	OnRemoveProxyRedirect     func(e regeneration.EndpointInfoSource, id string, proxyWaitGroup *completion.WaitGroup) (error, revert.FinalizeFunc, revert.RevertFunc)
+	OnUpdateNetworkPolicy     func(e regeneration.EndpointUpdater, policy *policy.L4Policy, proxyWaitGroup *completion.WaitGroup) (error, revert.RevertFunc)
+	OnRemoveNetworkPolicy     func(e regeneration.EndpointInfoSource)
+	OnQueueEndpointBuild      func(ctx context.Context, epID uint64) (func(), error)
+	OnRemoveFromEndpointQueue func(epID uint64)
+	OnDebugEnabled            func() bool
+	OnGetCompilationLock      func() *lock.RWMutex
+	OnSendNotification        func(typ monitorAPI.AgentNotification, text string) error
+	OnNewProxyLogRecord       func(l *accesslog.LogRecord) error
+	OnClearPolicyConsumers    func(id uint16) *sync.WaitGroup
 }
 
-func (ds *DaemonSuite) SetUpTest(c *C) {
-	// kvstore is initialized before generic SetUpTest so it must have been completed
-	ds.kvstoreInit = true
+func TestMain(m *testing.M) {
+	option.Config.Populate()
+	option.Config.IdentityAllocationMode = option.IdentityAllocationModeKVstore
 
 	time.Local = time.UTC
 	tempRunDir, err := ioutil.TempDir("", "cilium-test-run")
-	c.Assert(err, IsNil)
+	if err != nil {
+		panic("TempDir() failed.")
+	}
 	err = os.Mkdir(filepath.Join(tempRunDir, "globals"), 0777)
-	c.Assert(err, IsNil)
-
-	daemonConf := &Config{
-		DryMode:  true,
-		Opts:     option.NewBoolOptions(&options.Library),
-		Device:   "undefined",
-		RunDir:   tempRunDir,
-		StateDir: tempRunDir,
+	if err != nil {
+		panic("Mkdir failed")
 	}
 
-	// Get the default labels prefix filter
-	err = labels.ParseLabelPrefixCfg(nil, "")
-	c.Assert(err, IsNil)
-	daemonConf.Opts.Set(e.OptionDropNotify, true)
-	daemonConf.Opts.Set(e.OptionTraceNotify, true)
+	option.Config.DryMode = true
+	option.Config.Opts = option.NewIntOptions(&option.DaemonMutableOptionLibrary)
+	option.Config.Device = "undefined"
+	option.Config.RunDir = tempRunDir
+	option.Config.StateDir = tempRunDir
+	option.Config.AccessLog = filepath.Join(tempRunDir, "cilium-access.log")
 
-	d, err := NewDaemon(daemonConf)
+	// GetConfig the default labels prefix filter
+	err = labels.ParseLabelPrefixCfg(nil, "")
+	if err != nil {
+		panic("ParseLabelPrefixCfg() failed")
+	}
+	option.Config.Opts.SetBool(option.DropNotify, true)
+	option.Config.Opts.SetBool(option.TraceNotify, true)
+
+	// Disable restore of host IPs for unit tests. There can be arbitrary
+	// state left on disk.
+	option.Config.EnableHostIPRestore = false
+
+	os.Exit(m.Run())
+}
+
+type dummyEpSyncher struct{}
+
+func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint) {}
+
+func (ds *DaemonSuite) SetUpTest(c *C) {
+	ds.oldPolicyEnabled = policy.GetPolicyEnabled()
+	policy.SetPolicyEnabled(option.DefaultEnforcement)
+
+	d, _, err := NewDaemon(fakedatapath.NewDatapath(), nil)
 	c.Assert(err, IsNil)
 	ds.d = d
 
 	kvstore.DeletePrefix(common.OperationalPath)
 	kvstore.DeletePrefix(kvstore.BaseKeyPrefix)
 
-	policy.InitIdentityAllocator(d)
+	ds.OnTracingEnabled = nil
+	ds.OnAlwaysAllowLocalhost = nil
+	ds.OnGetCachedLabelList = nil
+	ds.OnGetPolicyRepository = nil
+	ds.OnUpdateProxyRedirect = nil
+	ds.OnRemoveProxyRedirect = nil
+	ds.OnUpdateNetworkPolicy = nil
+	ds.OnRemoveNetworkPolicy = nil
+	ds.OnQueueEndpointBuild = nil
+	ds.OnRemoveFromEndpointQueue = nil
+	ds.OnDebugEnabled = nil
+	ds.OnGetCompilationLock = nil
+	ds.OnSendNotification = nil
+	ds.OnNewProxyLogRecord = nil
+	ds.OnClearPolicyConsumers = nil
+	ds.d.endpointManager = endpointmanager.NewEndpointManager(&dummyEpSyncher{})
 }
 
 func (ds *DaemonSuite) TearDownTest(c *C) {
+	ds.d.endpointManager.RemoveAll()
+
 	if ds.d != nil {
-		os.RemoveAll(ds.d.conf.RunDir)
+		os.RemoveAll(option.Config.RunDir)
 	}
 
 	if ds.kvstoreInit {
 		kvstore.DeletePrefix(common.OperationalPath)
 		kvstore.DeletePrefix(kvstore.BaseKeyPrefix)
 	}
+
+	// Restore the policy enforcement mode.
+	policy.SetPolicyEnabled(ds.oldPolicyEnabled)
+
+	// Release the identity allocator reference created by NewDaemon. This
+	// is done manually here as we have no Close() function daemon
+	cache.Close()
+
+	ds.d.Close()
 }
 
 type DaemonEtcdSuite struct {
@@ -119,8 +174,12 @@ type DaemonEtcdSuite struct {
 
 var _ = Suite(&DaemonEtcdSuite{})
 
-func (e *DaemonEtcdSuite) SetUpTest(c *C) {
+func (e *DaemonEtcdSuite) SetUpSuite(c *C) {
 	kvstore.SetupDummy("etcd")
+	e.DaemonSuite.kvstoreInit = true
+}
+
+func (e *DaemonEtcdSuite) SetUpTest(c *C) {
 	e.DaemonSuite.SetUpTest(c)
 }
 
@@ -134,8 +193,12 @@ type DaemonConsulSuite struct {
 
 var _ = Suite(&DaemonConsulSuite{})
 
-func (e *DaemonConsulSuite) SetUpTest(c *C) {
+func (e *DaemonConsulSuite) SetUpSuite(c *C) {
 	kvstore.SetupDummy("consul")
+	e.DaemonSuite.kvstoreInit = true
+}
+
+func (e *DaemonConsulSuite) SetUpTest(c *C) {
 	e.DaemonSuite.SetUpTest(c)
 }
 
@@ -143,37 +206,9 @@ func (e *DaemonConsulSuite) TearDownTest(c *C) {
 	e.DaemonSuite.TearDownTest(c)
 }
 
-func (ds *DaemonSuite) TestMiniumWorkerThreadsIsSet(c *C) {
-	c.Assert(numWorkerThreads() >= 4, Equals, true)
+func (ds *DaemonSuite) TestMinimumWorkerThreadsIsSet(c *C) {
+	c.Assert(numWorkerThreads() >= 2, Equals, true)
 	c.Assert(numWorkerThreads() >= runtime.NumCPU(), Equals, true)
-}
-
-func (ds *DaemonSuite) TracingEnabled() bool {
-	if ds.OnTracingEnabled != nil {
-		return ds.OnTracingEnabled()
-	}
-	panic("TracingEnabled should not have been called")
-}
-
-func (ds *DaemonSuite) DryModeEnabled() bool {
-	if ds.OnDryModeEnabled != nil {
-		return ds.OnDryModeEnabled()
-	}
-	panic("DryModeEnabled should not have been called")
-}
-
-func (ds *DaemonSuite) EnableEndpointPolicyEnforcement(e *e.Endpoint) (bool, bool) {
-	if ds.OnEnableEndpointPolicyEnforcement != nil {
-		return ds.OnEnableEndpointPolicyEnforcement(e)
-	}
-	panic("UpdateEndpointPolicyEnforcement should not have been called")
-}
-
-func (ds *DaemonSuite) PolicyEnforcement() string {
-	if ds.OnPolicyEnforcement != nil {
-		return ds.OnPolicyEnforcement()
-	}
-	panic("PolicyEnforcement should not have been called")
 }
 
 func (ds *DaemonSuite) AlwaysAllowLocalhost() bool {
@@ -183,7 +218,7 @@ func (ds *DaemonSuite) AlwaysAllowLocalhost() bool {
 	panic("AlwaysAllowLocalhost should not have been called")
 }
 
-func (ds *DaemonSuite) GetCachedLabelList(id policy.NumericIdentity) (labels.LabelArray, error) {
+func (ds *DaemonSuite) GetCachedLabelList(id identity.NumericIdentity) (labels.LabelArray, error) {
 	if ds.OnGetCachedLabelList != nil {
 		return ds.OnGetCachedLabelList(id)
 	}
@@ -197,45 +232,38 @@ func (ds *DaemonSuite) GetPolicyRepository() *policy.Repository {
 	panic("GetPolicyRepository should not have been called")
 }
 
-func (ds *DaemonSuite) UpdateProxyRedirect(e *e.Endpoint, l4 *policy.L4Filter) (uint16, error) {
+func (ds *DaemonSuite) UpdateProxyRedirect(e regeneration.EndpointUpdater, l4 *policy.L4Filter, proxyWaitGroup *completion.WaitGroup) (uint16, error, revert.FinalizeFunc, revert.RevertFunc) {
 	if ds.OnUpdateProxyRedirect != nil {
-		return ds.OnUpdateProxyRedirect(e, l4)
+		return ds.OnUpdateProxyRedirect(e, l4, proxyWaitGroup)
 	}
 	panic("UpdateProxyRedirect should not have been called")
 }
 
-func (ds *DaemonSuite) RemoveProxyRedirect(e *e.Endpoint, id string) error {
+func (ds *DaemonSuite) RemoveProxyRedirect(e regeneration.EndpointInfoSource, id string, proxyWaitGroup *completion.WaitGroup) (error, revert.FinalizeFunc, revert.RevertFunc) {
 	if ds.OnRemoveProxyRedirect != nil {
-		return ds.OnRemoveProxyRedirect(e, id)
+		return ds.OnRemoveProxyRedirect(e, id, proxyWaitGroup)
 	}
 	panic("RemoveProxyRedirect should not have been called")
 }
 
-func (ds *DaemonSuite) GetStateDir() string {
-	if ds.OnGetStateDir != nil {
-		return ds.OnGetStateDir()
+func (ds *DaemonSuite) UpdateNetworkPolicy(e regeneration.EndpointUpdater, policy *policy.L4Policy,
+	proxyWaitGroup *completion.WaitGroup) (error, revert.RevertFunc) {
+	if ds.OnUpdateNetworkPolicy != nil {
+		return ds.OnUpdateNetworkPolicy(e, policy, proxyWaitGroup)
 	}
-	panic("GetStateDir should not have been called")
+	panic("UpdateNetworkPolicy should not have been called")
 }
 
-func (ds *DaemonSuite) GetBpfDir() string {
-	if ds.OnGetBpfDir != nil {
-		return ds.OnGetBpfDir()
+func (ds *DaemonSuite) RemoveNetworkPolicy(e regeneration.EndpointInfoSource) {
+	if ds.OnRemoveNetworkPolicy != nil {
+		ds.OnRemoveNetworkPolicy(e)
 	}
-	panic("GetBpfDir should not have been called")
+	panic("RemoveNetworkPolicy should not have been called")
 }
 
-func (ds *DaemonSuite) GetTunnelMode() string {
-	if ds.OnGetTunnelMode != nil {
-		return ds.OnGetTunnelMode()
-	}
-	panic("GetTunnelMode should not have been called")
-}
-
-func (ds *DaemonSuite) QueueEndpointBuild(r *e.Request) {
+func (ds *DaemonSuite) QueueEndpointBuild(ctx context.Context, epID uint64) (func(), error) {
 	if ds.OnQueueEndpointBuild != nil {
-		ds.OnQueueEndpointBuild(r)
-		return
+		return ds.OnQueueEndpointBuild(ctx, epID)
 	}
 	panic("QueueEndpointBuild should not have been called")
 }
@@ -262,23 +290,7 @@ func (ds *DaemonSuite) GetCompilationLock() *lock.RWMutex {
 	panic("GetCompilationLock should not have been called")
 }
 
-func (ds *DaemonSuite) ResetProxyPort(e *e.Endpoint, isCTLocal bool, ips []net.IP, idsToMod policy.SecurityIDContexts) {
-	if ds.OnResetProxyPort != nil {
-		ds.OnResetProxyPort(e, isCTLocal, ips, idsToMod)
-		return
-	}
-	panic("ResetProxyPort should not have been called")
-}
-
-func (ds *DaemonSuite) FlushCTEntries(e *e.Endpoint, isCTLocal bool, ips []net.IP, idsToKeep policy.SecurityIDContexts) {
-	if ds.OnFlushCTEntries != nil {
-		ds.OnFlushCTEntries(e, isCTLocal, ips, idsToKeep)
-		return
-	}
-	panic("FlushCTEntries should not have been called")
-}
-
-func (ds *DaemonSuite) SendNotification(typ monitor.AgentNotification, text string) error {
+func (ds *DaemonSuite) SendNotification(typ monitorAPI.AgentNotification, text string) error {
 	if ds.OnSendNotification != nil {
 		return ds.OnSendNotification(typ, text)
 	}
@@ -290,4 +302,23 @@ func (ds *DaemonSuite) NewProxyLogRecord(l *accesslog.LogRecord) error {
 		return ds.OnNewProxyLogRecord(l)
 	}
 	panic("NewProxyLogRecord should not have been called")
+}
+
+func (ds *DaemonSuite) Datapath() datapath.Datapath {
+	return ds.d.datapath
+}
+
+func (ds *DaemonSuite) ClearPolicyConsumers(id uint16) *sync.WaitGroup {
+	if ds.OnClearPolicyConsumers != nil {
+		return ds.OnClearPolicyConsumers(id)
+	}
+	panic("ClearPolicyConsumers should not have been called")
+}
+
+func (ds *DaemonSuite) GetNodeSuffix() string {
+	return ds.d.GetNodeSuffix()
+}
+
+func (ds *DaemonSuite) UpdateIdentities(added, deleted cache.IdentityCache) {
+	ds.d.UpdateIdentities(added, deleted)
 }

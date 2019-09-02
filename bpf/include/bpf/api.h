@@ -117,20 +117,18 @@ static int BPF_FUNC(map_delete_elem, void *map, const void *key);
 /* Time access */
 static uint64_t BPF_FUNC(ktime_get_ns);
 
+/* Sockets */
+static uint64_t BPF_FUNC(get_socket_cookie, void *ctx);
+
 /* Debugging */
 
-/* FIXME: __attribute__ ((format(printf, 1, 3))) not possible unless
- * llvm bug https://llvm.org/bugs/show_bug.cgi?id=26243 gets resolved.
- * It would require ____fmt to be made const, which generates a reloc
- * entry (non-map).
- */
+__attribute__((__format__(__printf__, 1, 3)))
 static void BPF_FUNC(trace_printk, const char *fmt, int fmt_size, ...);
 
 #ifndef printt
 # define printt(fmt, ...)						\
 	({								\
-		char ____fmt[] = fmt;					\
-		trace_printk(____fmt, sizeof(____fmt), ##__VA_ARGS__);	\
+		trace_printk(____fmt, ##__VA_ARGS__);			\
 	})
 #endif
 
@@ -158,6 +156,8 @@ static int BPF_FUNC(clone_redirect, struct __sk_buff *skb, int ifindex,
 		    uint32_t flags);
 
 /* Packet manipulation */
+static int BPF_FUNC(skb_load_bytes_relative, struct __sk_buff *skb, uint32_t off,
+		    void *to, uint32_t len, uint32_t hdr);
 static int BPF_FUNC(skb_load_bytes, struct __sk_buff *skb, uint32_t off,
 		    void *to, uint32_t len);
 static int BPF_FUNC(skb_store_bytes, struct __sk_buff *skb, uint32_t off,
@@ -175,6 +175,7 @@ static int BPF_FUNC(skb_change_proto, struct __sk_buff *skb, uint32_t proto,
 		    uint32_t flags);
 static int BPF_FUNC(skb_change_tail, struct __sk_buff *skb, uint32_t nlen,
 		    uint32_t flags);
+static int BPF_FUNC(skb_pull_data, struct __sk_buff *skb, uint32_t len);
 
 /* Packet vlan encap/decap */
 static int BPF_FUNC(skb_vlan_push, struct __sk_buff *skb, uint16_t proto,
@@ -196,6 +197,13 @@ static int BPF_FUNC(skb_set_tunnel_opt, struct __sk_buff *skb,
 /* Events for user space */
 static int BPF_FUNC2(skb_event_output, struct __sk_buff *skb, void *map, uint64_t index,
 		     const void *data, uint32_t size) = (void *)BPF_FUNC_perf_event_output;
+
+/* Sockops and SK_MSG helpers */
+static int BPF_FUNC(sock_map_update, struct bpf_sock_ops *skops, void *map, uint32_t key,  uint64_t flags);
+static int BPF_FUNC(sock_hash_update, struct bpf_sock_ops *skops, void *map, void *key,  uint64_t flags);
+static int BPF_FUNC(msg_redirect_hash, struct sk_msg_md *md, void *map, void *key, uint64_t flags);
+
+static int BPF_FUNC(fib_lookup, void *ctx, struct bpf_fib_lookup *params, uint32_t plen, uint32_t flags);
 
 /** LLVM built-ins, mem*() routines work for constant size */
 
@@ -224,14 +232,5 @@ static int BPF_FUNC2(skb_event_output, struct __sk_buff *skb, void *map, uint64_
 # define memcmp(a, b, n)	__builtin_memcmp((a), (b), (n))
 #endif
 #endif
-
-unsigned long long load_byte(void *skb, unsigned long long off)
-	asm ("llvm.bpf.load.byte");
-
-unsigned long long load_half(void *skb, unsigned long long off)
-	asm ("llvm.bpf.load.half");
-
-unsigned long long load_word(void *skb, unsigned long long off)
-	asm ("llvm.bpf.load.word");
 
 #endif /* __BPF_API__ */

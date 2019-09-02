@@ -2,20 +2,20 @@
 
 ## cilium bpf proxy list
 
-List proxy configuration
+List proxy configuration (deprecated)
 
 ### Synopsis
 
-
-List proxy configuration
+List proxy configuration (deprecated)
 
 ```
-cilium bpf proxy list
+cilium bpf proxy list [flags]
 ```
 
 ### Options
 
 ```
+  -h, --help            help for list
   -o, --output string   json| jsonpath='{}'
 ```
 
@@ -28,5 +28,6 @@ cilium bpf proxy list
 ```
 
 ### SEE ALSO
-* [cilium bpf proxy](cilium_bpf_proxy.html)	 - Proxy configuration
+
+* [cilium bpf proxy](../cilium_bpf_proxy)	 - Proxy configuration
 

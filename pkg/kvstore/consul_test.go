@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package kvstore
 
 import (
@@ -48,6 +50,13 @@ func TestMain(m *testing.M) {
 		handler(w, r)
 	})
 
+	mux.HandleFunc("/v1/session/create", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "{ \"ID\": \"adf4238a-882b-9ddc-4a9d-5b6758e4159e\"}")
+	})
+
+	// /v1/session/renew/{uuid} does not need to be handled for the basic
+	// test to succeed
+
 	srv := &http.Server{
 		Addr:    ":8000",
 		Handler: mux,
@@ -69,7 +78,7 @@ func TestConsulClientOk(t *testing.T) {
 
 	_, err := newConsulClient(&consulAPI.Config{
 		Address: ":8000",
-	})
+	}, nil)
 
 	select {
 	case <-doneC:

@@ -14,6 +14,7 @@ import (
 // PostIPAMURL generates an URL for the post IP a m operation
 type PostIPAMURL struct {
 	Family *string
+	Owner  *string
 
 	_basePath string
 	// avoid unkeyed usage
@@ -37,15 +38,15 @@ func (o *PostIPAMURL) SetBasePath(bp string) {
 
 // Build a url path and query string
 func (o *PostIPAMURL) Build() (*url.URL, error) {
-	var result url.URL
+	var _result url.URL
 
 	var _path = "/ipam"
 
 	_basePath := o._basePath
 	if _basePath == "" {
-		_basePath = "/v1beta"
+		_basePath = "/v1"
 	}
-	result.Path = golangswaggerpaths.Join(_basePath, _path)
+	_result.Path = golangswaggerpaths.Join(_basePath, _path)
 
 	qs := make(url.Values)
 
@@ -57,9 +58,17 @@ func (o *PostIPAMURL) Build() (*url.URL, error) {
 		qs.Set("family", family)
 	}
 
-	result.RawQuery = qs.Encode()
+	var owner string
+	if o.Owner != nil {
+		owner = *o.Owner
+	}
+	if owner != "" {
+		qs.Set("owner", owner)
+	}
 
-	return &result, nil
+	_result.RawQuery = qs.Encode()
+
+	return &_result, nil
 }
 
 // Must is a helper function to panic when the url builder returns an error

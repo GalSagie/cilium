@@ -21,19 +21,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cilium/cilium/pkg/envoy/api"
 	"github.com/cilium/cilium/pkg/envoy/xds"
 
+	"github.com/cilium/proxy/go/cilium/api"
+	envoy_api_v2 "github.com/cilium/proxy/go/envoy/api/v2"
 	net_context "golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
-)
-
-const (
-	ListenerTypeURL           = "type.googleapis.com/envoy.api.v2.Listener"
-	NetworkPolicyTypeURL      = "type.googleapis.com/envoy.api.v2.NetworkPolicy"
-	NetworkPolicyHostsTypeURL = "type.googleapis.com/envoy.api.v2.NetworkPolicyHosts"
-	RouteConfigurationTypeURL = "type.googleapis.com/envoy.api.v2.RouteConfiguration"
 )
 
 var (
@@ -42,28 +36,32 @@ var (
 	ErrNotImplemented = errors.New("not implemented")
 )
 
-// StartXDSGRPCServer starts a gRPC server to serve xDS APIs using the given
+// startXDSGRPCServer starts a gRPC server to serve xDS APIs using the given
 // resource watcher and network listener.
 // Returns a function that stops the GRPC server when called.
-func StartXDSGRPCServer(listener net.Listener, ldsConfig, rdsConfig *xds.ResourceTypeConfiguration, resourceAccessTimeout time.Duration) context.CancelFunc {
+func startXDSGRPCServer(listener net.Listener, ldsConfig, npdsConfig, nphdsConfig *xds.ResourceTypeConfiguration, resourceAccessTimeout time.Duration) context.CancelFunc {
 	grpcServer := grpc.NewServer()
 
 	xdsServer := xds.NewServer(map[string]*xds.ResourceTypeConfiguration{
 		ListenerTypeURL:           ldsConfig,
-		RouteConfigurationTypeURL: rdsConfig,
+		NetworkPolicyTypeURL:      npdsConfig,
+		NetworkPolicyHostsTypeURL: nphdsConfig,
 	}, resourceAccessTimeout)
 	dsServer := (*xdsGRPCServer)(xdsServer)
 
-	api.RegisterAggregatedDiscoveryServiceServer(grpcServer, dsServer)
-	api.RegisterListenerDiscoveryServiceServer(grpcServer, dsServer)
-	api.RegisterRouteDiscoveryServiceServer(grpcServer, dsServer)
+	// TODO: https://github.com/cilium/cilium/issues/5051
+	// Implement IncrementalAggregatedResources to support Incremental xDS.
+	//envoy_service_discovery_v2.RegisterAggregatedDiscoveryServiceServer(grpcServer, dsServer)
+	envoy_api_v2.RegisterListenerDiscoveryServiceServer(grpcServer, dsServer)
+	cilium.RegisterNetworkPolicyDiscoveryServiceServer(grpcServer, dsServer)
+	cilium.RegisterNetworkPolicyHostsDiscoveryServiceServer(grpcServer, dsServer)
 
 	reflection.Register(grpcServer)
 
 	go func() {
-		log.Infof("starting Envoy xDS gRPC server listening on %s", listener)
+		log.Infof("Envoy: Starting xDS gRPC server listening on %s", listener.Addr())
 		if err := grpcServer.Serve(listener); err != nil && !strings.Contains(err.Error(), "closed network connection") {
-			log.WithError(err).Error("failed to serve Envoy xDS gRPC API")
+			log.WithError(err).Fatal("Envoy: Failed to serve xDS gRPC API")
 		}
 	}()
 
@@ -74,25 +72,41 @@ func StartXDSGRPCServer(listener net.Listener, ldsConfig, rdsConfig *xds.Resourc
 // resource types supported by Cilium.
 type xdsGRPCServer xds.Server
 
-func (s *xdsGRPCServer) StreamAggregatedResources(stream api.AggregatedDiscoveryService_StreamAggregatedResourcesServer) error {
-	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, xds.AnyTypeURL)
+// TODO: https://github.com/cilium/cilium/issues/5051
+// Implement IncrementalAggregatedResources also to support Incremental xDS.
+//func (s *xdsGRPCServer) StreamAggregatedResources(stream envoy_service_discovery_v2.AggregatedDiscoveryService_StreamAggregatedResourcesServer) error {
+//	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, xds.AnyTypeURL)
+//}
+
+func (s *xdsGRPCServer) DeltaListeners(stream envoy_api_v2.ListenerDiscoveryService_DeltaListenersServer) error {
+	return ErrNotImplemented
 }
 
-func (s *xdsGRPCServer) StreamListeners(stream api.ListenerDiscoveryService_StreamListenersServer) error {
+func (s *xdsGRPCServer) StreamListeners(stream envoy_api_v2.ListenerDiscoveryService_StreamListenersServer) error {
 	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, ListenerTypeURL)
 }
 
-func (s *xdsGRPCServer) FetchListeners(ctx net_context.Context, req *api.DiscoveryRequest) (*api.DiscoveryResponse, error) {
+func (s *xdsGRPCServer) FetchListeners(ctx net_context.Context, req *envoy_api_v2.DiscoveryRequest) (*envoy_api_v2.DiscoveryResponse, error) {
 	// The Fetch methods are only called via the REST API, which is not
 	// implemented in Cilium. Only the Stream methods are called over gRPC.
 	return nil, ErrNotImplemented
 }
 
-func (s *xdsGRPCServer) StreamRoutes(stream api.RouteDiscoveryService_StreamRoutesServer) error {
-	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, RouteConfigurationTypeURL)
+func (s *xdsGRPCServer) StreamNetworkPolicies(stream cilium.NetworkPolicyDiscoveryService_StreamNetworkPoliciesServer) error {
+	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, NetworkPolicyTypeURL)
 }
 
-func (s *xdsGRPCServer) FetchRoutes(ctx net_context.Context, req *api.DiscoveryRequest) (*api.DiscoveryResponse, error) {
+func (s *xdsGRPCServer) FetchNetworkPolicies(ctx net_context.Context, req *envoy_api_v2.DiscoveryRequest) (*envoy_api_v2.DiscoveryResponse, error) {
+	// The Fetch methods are only called via the REST API, which is not
+	// implemented in Cilium. Only the Stream methods are called over gRPC.
+	return nil, ErrNotImplemented
+}
+
+func (s *xdsGRPCServer) StreamNetworkPolicyHosts(stream cilium.NetworkPolicyHostsDiscoveryService_StreamNetworkPolicyHostsServer) error {
+	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, NetworkPolicyHostsTypeURL)
+}
+
+func (s *xdsGRPCServer) FetchNetworkPolicyHosts(ctx net_context.Context, req *envoy_api_v2.DiscoveryRequest) (*envoy_api_v2.DiscoveryResponse, error) {
 	// The Fetch methods are only called via the REST API, which is not
 	// implemented in Cilium. Only the Stream methods are called over gRPC.
 	return nil, ErrNotImplemented

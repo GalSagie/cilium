@@ -20,7 +20,7 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	. "github.com/cilium/cilium/api/v1/server/restapi/prefilter"
-	"github.com/cilium/cilium/pkg/apierror"
+	"github.com/cilium/cilium/pkg/api"
 	"github.com/go-openapi/runtime/middleware"
 )
 
@@ -38,74 +38,49 @@ func (h *getPrefilter) Handle(params GetPrefilterParams) middleware.Responder {
 	var revision int64
 	if h.d.preFilter == nil {
 		msg := fmt.Errorf("Prefilter is not enabled in daemon")
-		return apierror.Error(GetPrefilterFailureCode, msg)
+		return api.Error(GetPrefilterFailureCode, msg)
 	}
 	list, revision = h.d.preFilter.Dump(list)
-	cl := &models.CIDRList{
+	spec := &models.PrefilterSpec{
 		Revision: revision,
-		List:     list,
+		Deny:     list,
 	}
-	return NewGetPrefilterOK().WithPayload(cl)
+	status := &models.Prefilter{
+		Spec: spec,
+		Status: &models.PrefilterStatus{
+			Realized: spec,
+		},
+	}
+	return NewGetPrefilterOK().WithPayload(status)
 }
 
-type putPrefilter struct {
+type patchPrefilter struct {
 	d *Daemon
 }
 
-// NewPutPrefilterHandler returns new put handler for api
-func NewPutPrefilterHandler(d *Daemon) PutPrefilterHandler {
-	return &putPrefilter{d: d}
+// NewPatchPrefilterHandler returns new patch handler for api
+func NewPatchPrefilterHandler(d *Daemon) PatchPrefilterHandler {
+	return &patchPrefilter{d: d}
 }
 
-func (h *putPrefilter) Handle(params PutPrefilterParams) middleware.Responder {
+func (h *patchPrefilter) Handle(params PatchPrefilterParams) middleware.Responder {
 	var list []net.IPNet
-	cl := params.CidrList
+	spec := params.PrefilterSpec
 	if h.d.preFilter == nil {
 		msg := fmt.Errorf("Prefilter is not enabled in daemon")
-		return apierror.Error(PutPrefilterFailureCode, msg)
+		return api.Error(PatchPrefilterFailureCode, msg)
 	}
-	for _, cidrStr := range cl.List {
+	for _, cidrStr := range spec.Deny {
 		_, cidr, err := net.ParseCIDR(cidrStr)
 		if err != nil {
 			msg := fmt.Errorf("Invalid CIDR string %s", cidrStr)
-			return apierror.Error(PutPrefilterInvalidCIDRCode, msg)
+			return api.Error(PatchPrefilterInvalidCIDRCode, msg)
 		}
 		list = append(list, *cidr)
 	}
-	err := h.d.preFilter.Insert(cl.Revision, list)
+	err := h.d.preFilter.Insert(spec.Revision, list)
 	if err != nil {
-		return apierror.Error(PutPrefilterFailureCode, err)
+		return api.Error(PatchPrefilterFailureCode, err)
 	}
-	return NewPutPrefilterOK()
-}
-
-type deletePrefilter struct {
-	d *Daemon
-}
-
-// NewDeletePrefilterHandler returns new delete handler for api
-func NewDeletePrefilterHandler(d *Daemon) DeletePrefilterHandler {
-	return &deletePrefilter{d: d}
-}
-
-func (h *deletePrefilter) Handle(params DeletePrefilterParams) middleware.Responder {
-	var list []net.IPNet
-	cl := params.CidrList
-	if h.d.preFilter == nil {
-		msg := fmt.Errorf("Prefilter is not enabled in daemon")
-		return apierror.Error(DeletePrefilterFailureCode, msg)
-	}
-	for _, cidrStr := range cl.List {
-		_, cidr, err := net.ParseCIDR(cidrStr)
-		if err != nil {
-			msg := fmt.Errorf("Invalid CIDR string %s", cidrStr)
-			return apierror.Error(DeletePrefilterInvalidCIDRCode, msg)
-		}
-		list = append(list, *cidr)
-	}
-	err := h.d.preFilter.Delete(cl.Revision, list)
-	if err != nil {
-		return apierror.Error(DeletePrefilterFailureCode, err)
-	}
-	return NewDeletePrefilterOK()
+	return NewPatchPrefilterOK()
 }

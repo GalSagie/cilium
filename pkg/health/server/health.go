@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import (
 	healthModels "github.com/cilium/cilium/api/v1/health/models"
 	. "github.com/cilium/cilium/api/v1/health/server/restapi"
 	ciliumModels "github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/pkg/apierror"
+	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/client"
 
 	"github.com/c9s/goprocinfo/linux"
@@ -63,11 +63,11 @@ func (h *getHealthz) Handle(params GetHealthzParams) middleware.Responder {
 
 	ciliumStatus, err := h.getCiliumStatus()
 	if err != nil {
-		return apierror.Error(GetHealthzFailedCode, err)
+		return api.Error(GetHealthzFailedCode, err)
 	}
 	load, err := dumpLoad()
 	if err != nil {
-		return apierror.Error(GetHealthzFailedCode, err)
+		return api.Error(GetHealthzFailedCode, err)
 	}
 
 	sr := healthModels.HealthResponse{}

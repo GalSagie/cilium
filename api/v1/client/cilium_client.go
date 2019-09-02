@@ -14,6 +14,7 @@ import (
 	"github.com/cilium/cilium/api/v1/client/daemon"
 	"github.com/cilium/cilium/api/v1/client/endpoint"
 	"github.com/cilium/cilium/api/v1/client/ipam"
+	"github.com/cilium/cilium/api/v1/client/metrics"
 	"github.com/cilium/cilium/api/v1/client/policy"
 	"github.com/cilium/cilium/api/v1/client/prefilter"
 	"github.com/cilium/cilium/api/v1/client/service"
@@ -28,7 +29,7 @@ const (
 	DefaultHost string = "localhost"
 	// DefaultBasePath is the default BasePath
 	// found in Meta (info) section of spec file
-	DefaultBasePath string = "/v1beta"
+	DefaultBasePath string = "/v1"
 )
 
 // DefaultSchemes are the default schemes found in Meta (info) section of spec file
@@ -43,9 +44,6 @@ func NewHTTPClient(formats strfmt.Registry) *Cilium {
 // using a customizable transport config.
 func NewHTTPClientWithConfig(formats strfmt.Registry, cfg *TransportConfig) *Cilium {
 	// ensure nullable parameters have default
-	if formats == nil {
-		formats = strfmt.Default
-	}
 	if cfg == nil {
 		cfg = DefaultTransportConfig()
 	}
@@ -57,6 +55,11 @@ func NewHTTPClientWithConfig(formats strfmt.Registry, cfg *TransportConfig) *Cil
 
 // New creates a new cilium client
 func New(transport runtime.ClientTransport, formats strfmt.Registry) *Cilium {
+	// ensure nullable parameters have default
+	if formats == nil {
+		formats = strfmt.Default
+	}
+
 	cli := new(Cilium)
 	cli.Transport = transport
 
@@ -65,6 +68,8 @@ func New(transport runtime.ClientTransport, formats strfmt.Registry) *Cilium {
 	cli.Endpoint = endpoint.New(transport, formats)
 
 	cli.IPAM = ipam.New(transport, formats)
+
+	cli.Metrics = metrics.New(transport, formats)
 
 	cli.Policy = policy.New(transport, formats)
 
@@ -122,6 +127,8 @@ type Cilium struct {
 
 	IPAM *ipam.Client
 
+	Metrics *metrics.Client
+
 	Policy *policy.Client
 
 	Prefilter *prefilter.Client
@@ -140,6 +147,8 @@ func (c *Cilium) SetTransport(transport runtime.ClientTransport) {
 	c.Endpoint.SetTransport(transport)
 
 	c.IPAM.SetTransport(transport)
+
+	c.Metrics.SetTransport(transport)
 
 	c.Policy.SetTransport(transport)
 

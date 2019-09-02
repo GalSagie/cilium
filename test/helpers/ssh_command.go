@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,11 @@ type SSHClient struct {
 	Port   int               // Port to connect to the target server
 	client *ssh.Client       // Client implements a traditional SSH client that supports shells,
 	// subprocesses, TCP port/streamlocal forwarding and tunneled dialing.
+}
+
+// GetHostPort returns the host port representation of the ssh client
+func (cli *SSHClient) GetHostPort() string {
+	return net.JoinHostPort(cli.Host, strconv.Itoa(cli.Port))
 }
 
 // SSHConfig contains metadata for an SSH session.
@@ -132,7 +137,7 @@ func ImportSSHconfig(config []byte) (SSHConfigs, error) {
 // copyWait runs an instance of io.Copy() in a goroutine, and returns a channel
 // to receive the error result.
 func copyWait(dst io.Writer, src io.Reader) chan error {
-	c := make(chan error)
+	c := make(chan error, 1)
 	go func() {
 		_, err := io.Copy(dst, src)
 		c <- err
@@ -142,32 +147,33 @@ func copyWait(dst io.Writer, src io.Reader) chan error {
 
 // runCommand runs the specified command on the provided SSH session, and
 // gathers both of the sterr and stdout output into the writers provided by
-// cmd. Returns nil when the command completes successfully and all stderr,
+// cmd. Returns whether the command was run and an optional error.
+// Returns nil when the command completes successfully and all stderr,
 // stdout output has been written. Returns an error otherwise.
-func runCommand(session *ssh.Session, cmd *SSHCommand) error {
+func runCommand(session *ssh.Session, cmd *SSHCommand) (bool, error) {
 	stderr, err := session.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("Unable to setup stderr for session: %v", err)
+		return false, fmt.Errorf("Unable to setup stderr for session: %v", err)
 	}
 	errChan := copyWait(cmd.Stderr, stderr)
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("Unable to setup stdout for session: %v", err)
+		return false, fmt.Errorf("Unable to setup stdout for session: %v", err)
 	}
 	outChan := copyWait(cmd.Stdout, stdout)
 
 	if err = session.Run(cmd.Path); err != nil {
-		return err
+		return false, err
 	}
 
 	if err = <-errChan; err != nil {
-		return err
+		return true, err
 	}
 	if err = <-outChan; err != nil {
-		return err
+		return true, err
 	}
-	return nil
+	return true, nil
 }
 
 // RunCommand runs a SSHCommand using SSHClient client. The returned error is
@@ -180,14 +186,17 @@ func (client *SSHClient) RunCommand(cmd *SSHCommand) error {
 	}
 	defer session.Close()
 
-	return runCommand(session, cmd)
+	_, err = runCommand(session, cmd)
+	return err
 }
 
-// RunCommandContext runs an SSH command in a similar way to RunCommand, but
-// with a context which allows the command to be cancelled at any time.
-func (client *SSHClient) RunCommandContext(ctx context.Context, cmd *SSHCommand) error {
+// RunCommandInBackground runs an SSH command in a similar way to
+// RunCommandContext, but with a context which allows the command to be
+// cancelled at any time. When cancel is called the error of the command is
+// returned instead the context error.
+func (client *SSHClient) RunCommandInBackground(ctx context.Context, cmd *SSHCommand) error {
 	if ctx == nil {
-		panic("nil context provided to RunCommandContext()")
+		panic("nil context provided to RunCommandInBackground()")
 	}
 
 	session, err := client.newSession()
@@ -203,16 +212,86 @@ func (client *SSHClient) RunCommandContext(ctx context.Context, cmd *SSHCommand)
 	}
 	session.RequestPty("xterm-256color", 80, 80, modes)
 
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		log.Errorf("Could not get stdin: %s", err)
+	}
+
 	go func() {
 		select {
 		case <-ctx.Done():
-			if err := session.Signal(ssh.SIGHUP); err != nil {
+			_, err := stdin.Write([]byte{3})
+			if err != nil {
+				log.Errorf("write ^C error: %s", err)
+			}
+			err = session.Wait()
+			if err != nil {
+				log.Errorf("wait error: %s", err)
+			}
+			if err = session.Signal(ssh.SIGHUP); err != nil {
 				log.Errorf("failed to kill command: %s", err)
 			}
-			session.Close()
+			if err = session.Close(); err != nil {
+				log.Errorf("failed to close session: %s", err)
+			}
 		}
 	}()
-	return runCommand(session, cmd)
+	_, err = runCommand(session, cmd)
+	return err
+}
+
+// RunCommandContext runs an SSH command in a similar way to RunCommand but with
+// a context. If context is canceled it will return the error of that given
+// context.
+func (client *SSHClient) RunCommandContext(ctx context.Context, cmd *SSHCommand) error {
+	if ctx == nil {
+		panic("nil context provided to RunCommandContext()")
+	}
+
+	var (
+		session        *ssh.Session
+		sessionErrChan = make(chan error, 1)
+	)
+
+	go func() {
+		var sessionErr error
+
+		// This may block depending on the state of the setup tests are being
+		// ran against. As a result, these goroutines may leak, but the logic
+		// below will fail and propagate to the rest of the CI framework, which
+		// will error out anyway. It's better to leak in really bad cases since
+		// the CI will fail anyway. Unfortunately, the golang SSH library does
+		// not provide a way to propagate context through to creating sessions.
+
+		// Note that this is a closure on the session variable!
+		session, sessionErr = client.newSession()
+		if sessionErr != nil {
+			log.Infof("error creating session: %s", sessionErr)
+			sessionErrChan <- sessionErr
+			return
+		}
+
+		_, runErr := runCommand(session, cmd)
+		sessionErrChan <- runErr
+	}()
+
+	select {
+	case asyncErr := <-sessionErrChan:
+		return asyncErr
+	case <-ctx.Done():
+		if session != nil {
+			log.Warning("sending SIGHUP to session due to canceled context")
+			if err := session.Signal(ssh.SIGHUP); err != nil {
+				log.Errorf("failed to kill command when context is canceled: %s", err)
+			}
+			if closeErr := session.Close(); closeErr != nil {
+				log.WithError(closeErr).Error("failed to close session")
+			}
+		} else {
+			log.Error("timeout reached; no session was able to be created")
+		}
+		return ctx.Err()
+	}
 }
 
 func (client *SSHClient) newSession() (*ssh.Session, error) {

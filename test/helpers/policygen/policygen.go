@@ -20,7 +20,7 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultAllOK,
 			template: map[string]string{
-				"FromEndpoints": `[{}]`,
+				"fromEndpoints": `[{}]`,
 			},
 		},
 		{
@@ -28,7 +28,7 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultAllOK,
 			template: map[string]string{
-				"FromEndpoints": `[{"matchLabels": { "id": "{{.SrcPod}}"}}]`,
+				"fromEndpoints": `[{"matchLabels": { "id": "{{.SrcPod}}"}}]`,
 			},
 		},
 		{
@@ -36,7 +36,7 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultAllTimeout,
 			template: map[string]string{
-				"FromEndpoints": `[{"matchLabels": { "id": "{{.SrcPod}}Invalid"}}]`,
+				"fromEndpoints": `[{"matchLabels": { "id": "{{.SrcPod}}Invalid"}}]`,
 			},
 		},
 	},
@@ -52,7 +52,15 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultOnlyHTTP,
 			template: map[string]string{
-				"Ports": `[{"port": "80"}]`,
+				"ports": `[{"port": "80"}]`,
+			},
+		},
+		{
+			name:  "Egress Port 80 No protocol",
+			kind:  egress,
+			tests: ConnResultOnlyHTTP,
+			template: map[string]string{
+				"ports": `[{"port": "80"}]`,
 			},
 		},
 		{
@@ -60,7 +68,7 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultOnlyHTTP,
 			template: map[string]string{
-				"Ports": `[{"port": "80", "protocol": "TCP"}]`,
+				"ports": `[{"port": "80", "protocol": "TCP"}]`,
 			},
 		},
 		{
@@ -68,7 +76,23 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultAllTimeout,
 			template: map[string]string{
-				"Ports": `[{"port": "80", "protocol": "UDP"}]`,
+				"ports": `[{"port": "80", "protocol": "UDP"}]`,
+			},
+		},
+		{
+			name:  "Egress Port 80 TCP",
+			kind:  egress,
+			tests: ConnResultOnlyHTTP,
+			template: map[string]string{
+				"ports": `[{"port": "80", "protocol": "TCP"}]`,
+			},
+		},
+		{
+			name:  "Egress Port 80 UDP",
+			kind:  egress,
+			tests: ConnResultAllTimeout,
+			template: map[string]string{
+				"ports": `[{"port": "80", "protocol": "UDP"}]`,
 			},
 		},
 	},
@@ -84,17 +108,25 @@ var policiesTestSuite = PolicyTestSuite{
 			kind:  ingress,
 			tests: ConnResultOnlyHTTPPrivate,
 			template: map[string]string{
-				"Rules": `{"http": [{"method": "GET", "path": "/private"}]}`,
-				"Ports": `[{"port": "80", "protocol": "TCP"}]`,
+				"rules": `{"http": [{"method": "GET", "path": "/private"}]}`,
+				"ports": `[{"port": "80", "protocol": "TCP"}]`,
+			},
+			exclude: []string{
+				"L4:Ingress Port 80 UDP",
+				"L4:Ingress Port 80 No protocol",
 			},
 		},
 		{
 			name:  "Egress policy to /private/",
 			kind:  egress,
-			tests: ConnResultOnlyHTTPPrivateAndPing,
+			tests: ConnResultOnlyHTTPPrivate,
 			template: map[string]string{
-				"Rules": `{"http": [{"method": "GET", "path": "/private"}]}`,
-				"Ports": `[{"port": "{{ .Destination.PortNumber }}", "protocol": "TCP"}]`,
+				"rules": `{"http": [{"method": "GET", "path": "/private"}]}`,
+				"ports": `[{"port": "80", "protocol": "TCP"}]`,
+			},
+			exclude: []string{
+				"L4:Egress Port 80 UDP",
+				"L4:Egress Port 80 No protocol",
 			},
 		},
 	},
@@ -134,7 +166,6 @@ func GetBasicTestSpec() TestSpec {
 			},
 		},
 		l4: PolicyTestKind{
-
 			name:  "Ingress Port 80 TCP",
 			kind:  ingress,
 			tests: ConnResultOnlyHTTP,

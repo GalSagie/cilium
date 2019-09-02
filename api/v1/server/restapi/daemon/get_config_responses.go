@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // GetConfigOKCode is the HTTP code returned for type GetConfigOK
@@ -25,22 +25,23 @@ type GetConfigOK struct {
 	/*
 	  In: Body
 	*/
-	Payload *models.DaemonConfigurationResponse `json:"body,omitempty"`
+	Payload *models.DaemonConfiguration `json:"body,omitempty"`
 }
 
 // NewGetConfigOK creates GetConfigOK with default headers values
 func NewGetConfigOK() *GetConfigOK {
+
 	return &GetConfigOK{}
 }
 
 // WithPayload adds the payload to the get config o k response
-func (o *GetConfigOK) WithPayload(payload *models.DaemonConfigurationResponse) *GetConfigOK {
+func (o *GetConfigOK) WithPayload(payload *models.DaemonConfiguration) *GetConfigOK {
 	o.Payload = payload
 	return o
 }
 
 // SetPayload sets the payload to the get config o k response
-func (o *GetConfigOK) SetPayload(payload *models.DaemonConfigurationResponse) {
+func (o *GetConfigOK) SetPayload(payload *models.DaemonConfiguration) {
 	o.Payload = payload
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,9 +14,24 @@
 
 package api
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Rules is a collection of api.Rule.
 //
 // All rules must be evaluated in order to come to a conclusion. While
 // it is sufficient to have a single fromEndpoints rule match, none of
 // the fromRequires may be violated at the same time.
 type Rules []*Rule
+
+func (rs Rules) String() string {
+	strRules := make([]string, 0, len(rs))
+
+	for _, r := range rs {
+		strRules = append(strRules, fmt.Sprintf("%+v", r))
+	}
+
+	return "[" + strings.Join(strRules, ",\n") + "]"
+}

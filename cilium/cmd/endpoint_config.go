@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
-	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/command"
+	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/spf13/cobra"
@@ -45,16 +46,19 @@ var endpointConfigCmd = &cobra.Command{
 func init() {
 	endpointCmd.AddCommand(endpointConfigCmd)
 	endpointConfigCmd.Flags().BoolVarP(&listOptions, "list-options", "", false, "List available options")
+	command.AddJSONOutput(endpointConfigCmd)
 }
 
+var endpointMutableOptionLibrary = option.GetEndpointMutableOptionLibrary()
+
 func listEndpointOptions() {
-	for k, s := range endpoint.EndpointOptionLibrary {
+	for k, s := range endpointMutableOptionLibrary {
 		fmt.Printf("%-24s %s\n", k, s.Description)
 	}
 }
 
 func configEndpoint(cmd *cobra.Command, args []string) {
-	_, id, _ := endpoint.ValidateID(args[0])
+	_, id, _ := endpointid.Parse(args[0])
 	cfg, err := client.EndpointConfigGet(id)
 	if err != nil {
 		Fatalf("Cannot get configuration of endpoint %s: %s\n", id, err)
@@ -62,27 +66,29 @@ func configEndpoint(cmd *cobra.Command, args []string) {
 
 	opts := args[1:]
 	if len(opts) == 0 {
+		if command.OutputJSON() {
+			if err := command.PrintOutput(cfg); err != nil {
+				os.Exit(1)
+			}
+			return
+		}
+
 		dumpConfig(cfg.Immutable)
-		dumpConfig(cfg.Mutable)
+		dumpConfig(cfg.Realized.Options)
 		return
 	}
 
-	epOpts := make(models.ConfigurationMap, len(opts))
-
+	// modify the configuration we fetched directly since we don't need it
+	modifiedOptsCfg := cfg.Realized
 	for k := range opts {
-		name, value, err := option.ParseOption(opts[k], &endpoint.EndpointOptionLibrary)
+		name, value, err := option.ParseOption(opts[k], &endpointMutableOptionLibrary)
 		if err != nil {
 			Fatalf("Cannot parse option %s: %s", opts[k], err)
 		}
-
-		if value {
-			epOpts[name] = "enabled"
-		} else {
-			epOpts[name] = "disabled"
-		}
+		modifiedOptsCfg.Options[name] = fmt.Sprintf("%d", value)
 	}
 
-	err = client.EndpointConfigPatch(id, epOpts)
+	err = client.EndpointConfigPatch(id, modifiedOptsCfg)
 	if err != nil {
 		Fatalf("Cannot update endpoint %s: %s", id, err)
 	}

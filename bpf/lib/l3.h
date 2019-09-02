@@ -28,8 +28,9 @@
 #include "icmp6.h"
 #include "csum.h"
 
+#ifdef ENABLE_IPV6
 static inline int __inline__ ipv6_l3(struct __sk_buff *skb, int l3_off,
-				     __u8 *smac, __u8 *dmac)
+				     __u8 *smac, __u8 *dmac, __u8 direction)
 {
 	int ret;
 
@@ -39,7 +40,7 @@ static inline int __inline__ ipv6_l3(struct __sk_buff *skb, int l3_off,
 
 	if (ret > 0) {
 		/* Hoplimit was reached */
-		return icmp6_send_time_exceeded(skb, l3_off);
+		return icmp6_send_time_exceeded(skb, l3_off, direction);
 	}
 
 	if (smac && eth_store_saddr(skb, smac, 0) < 0)
@@ -50,6 +51,7 @@ static inline int __inline__ ipv6_l3(struct __sk_buff *skb, int l3_off,
 
 	return TC_ACT_OK;
 }
+#endif /* ENABLE_IPV6 */
 
 static inline int __inline__ ipv4_l3(struct __sk_buff *skb, int l3_off,
 				     __u8 *smac, __u8 *dmac, struct iphdr *ip4)
@@ -68,44 +70,10 @@ static inline int __inline__ ipv4_l3(struct __sk_buff *skb, int l3_off,
 	return TC_ACT_OK;
 }
 
-#ifndef DISABLE_PORT_MAP
-static inline int __inline__ map_lxc_in(struct __sk_buff *skb, int l4_off,
-					struct endpoint_info *lxc, __u8 nexthdr)
-{
-	struct csum_offset off = {};
-	uint16_t dport;
-	int i, ret;
-
-	if (!lxc->portmap[0].to)
-		return 0;
-
-	/* Ignore unknown L4 protocols */
-	if (nexthdr != IPPROTO_TCP && nexthdr != IPPROTO_UDP)
-		return 0;
-
-	/* Port offsets for TCP and UDP are the same */
-	if (skb_load_bytes(skb, l4_off + TCP_DPORT_OFF, &dport, sizeof(dport)) < 0)
-		return DROP_INVALID;
-
-	csum_l4_offset_and_flags(nexthdr, &off);
-
-#pragma unroll
-	for (i = 0; i < PORTMAP_MAX; i++) {
-		if (!lxc->portmap[i].to || !lxc->portmap[i].from)
-			break;
-
-		ret = l4_port_map_in(skb, l4_off, &off, &lxc->portmap[i], dport);
-		if (IS_ERR(ret))
-			return ret;
-	}
-
-	return 0;
-}
-#endif /* DISABLE_PORT_MAP */
-
+#ifdef ENABLE_IPV6
 static inline int ipv6_local_delivery(struct __sk_buff *skb, int l3_off, int l4_off,
 				      __u32 seclabel, struct ipv6hdr *ip6, __u8 nexthdr,
-				      struct endpoint_info *ep)
+				      struct endpoint_info *ep, __u8 direction)
 {
 	int ret;
 
@@ -115,27 +83,34 @@ static inline int ipv6_local_delivery(struct __sk_buff *skb, int l3_off, int l4_
 	mac_t router_mac = ep->node_mac;
 
 	/* This will invalidate the size check */
-	ret = ipv6_l3(skb, l3_off, (__u8 *) &router_mac, (__u8 *) &lxc_mac);
+	ret = ipv6_l3(skb, l3_off, (__u8 *) &router_mac, (__u8 *) &lxc_mac, direction);
 	if (ret != TC_ACT_OK)
 		return ret;
 
-#ifndef DISABLE_PORT_MAP
-	ret = map_lxc_in(skb, l4_off, ep, nexthdr);
-	if (IS_ERR(ret))
-		return ret;
-#endif /* DISABLE_PORT_MAP */
+#if defined LOCAL_DELIVERY_METRICS
+	/*
+	 * Special LXC case for updating egress forwarding metrics.
+	 * Note that the packet could still be dropped but it would show up
+	 * as an ingress drop counter in metrics.
+	 */
+	update_metrics(skb->len, direction, REASON_FORWARDED);
+#endif
 
-	cilium_dbg(skb, DBG_LXC_FOUND, ep->ifindex, ep->sec_label);
+#if defined USE_BPF_PROG_FOR_INGRESS_POLICY && !defined FORCE_LOCAL_POLICY_EVAL_AT_SOURCE
+	skb->mark = (seclabel << 16) | MARK_MAGIC_IDENTITY;
+	return redirect_peer(ep->ifindex, 0);
+#else
 	skb->cb[CB_SRC_LABEL] = seclabel;
 	skb->cb[CB_IFINDEX] = ep->ifindex;
-
-	tail_call(skb, &cilium_policy, ep->lxc_id);
+	tail_call(skb, &POLICY_CALL_MAP, ep->lxc_id);
 	return DROP_MISSED_TAIL_CALL;
+#endif
 }
+#endif /* ENABLE_IPV6 */
 
 static inline int __inline__ ipv4_local_delivery(struct __sk_buff *skb, int l3_off, int l4_off,
 						 __u32 seclabel, struct iphdr *ip4,
-						 struct endpoint_info *ep)
+						 struct endpoint_info *ep, __u8 direction)
 {
 	int ret;
 
@@ -143,24 +118,60 @@ static inline int __inline__ ipv4_local_delivery(struct __sk_buff *skb, int l3_o
 
 	mac_t lxc_mac = ep->mac;
 	mac_t router_mac = ep->node_mac;
-	__u8 nexthdr = ip4->protocol;
 
 	ret = ipv4_l3(skb, l3_off, (__u8 *) &router_mac, (__u8 *) &lxc_mac, ip4);
 	if (ret != TC_ACT_OK)
 		return ret;
 
-#ifndef DISABLE_PORT_MAP
-	ret = map_lxc_in(skb, l4_off, ep, nexthdr);
-	if (IS_ERR(ret))
-		return ret;
-#endif /* DISABLE_PORT_MAP */
+#if defined LOCAL_DELIVERY_METRICS
+	/*
+	 * Special LXC case for updating egress forwarding metrics.
+	 * Note that the packet could still be dropped but it would show up
+	 * as an ingress drop counter in metrics.
+	 */
+	update_metrics(skb->len, direction, REASON_FORWARDED);
+#endif
 
-	cilium_dbg(skb, DBG_LXC_FOUND, ep->ifindex, ep->sec_label);
+#if defined USE_BPF_PROG_FOR_INGRESS_POLICY && !defined FORCE_LOCAL_POLICY_EVAL_AT_SOURCE
+	skb->mark = (seclabel << 16) | MARK_MAGIC_IDENTITY;
+	return redirect_peer(ep->ifindex, 0);
+#else
 	skb->cb[CB_SRC_LABEL] = seclabel;
 	skb->cb[CB_IFINDEX] = ep->ifindex;
-
-	tail_call(skb, &cilium_policy, ep->lxc_id);
+	tail_call(skb, &POLICY_CALL_MAP, ep->lxc_id);
 	return DROP_MISSED_TAIL_CALL;
+#endif
+}
+
+static inline __u8 __inline__ get_encrypt_key(__u32 ctx)
+{
+	struct encrypt_key key = {.ctx = ctx};
+	struct encrypt_config *cfg;
+
+	cfg = map_lookup_elem(&ENCRYPT_MAP, &key);
+	/* Having no key info for a context is the same as no encryption */
+	if (!cfg)
+		return 0;
+	return cfg->encrypt_key;
+}
+
+static inline __u8 __inline__ get_min_encrypt_key(__u8 peer_key)
+{
+	__u8 local_key = get_encrypt_key(0);
+
+	/* If both ends can encrypt/decrypt use smaller of the two this
+	 * way both ends will have keys installed assuming key IDs are
+	 * always increasing. However, we have to handle roll-over case
+	 * and to do this safely we assume keys are no more than one ahead.
+	 * We expect user/control-place to accomplish this. Notice zero
+	 * will always be returned if either local or peer have the zero
+	 * key indicating no encryption.
+	 */
+	if (peer_key == MAX_KEY_INDEX)
+		return local_key == 1 ? peer_key : local_key;
+	if (local_key == MAX_KEY_INDEX)
+		return peer_key == 1 ? local_key : peer_key;
+	return local_key < peer_key ? local_key : peer_key;
 }
 
 #endif

@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2018 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,12 +16,13 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
-	"os/exec"
 
 	"github.com/cilium/cilium/api/v1/models"
 	restapi "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/api/v1/server/restapi/endpoint"
+	"github.com/cilium/cilium/pkg/debug"
 	"github.com/cilium/cilium/pkg/version"
 
 	"github.com/go-openapi/runtime/middleware"
@@ -48,20 +49,15 @@ func (h *getDebugInfo) Handle(params restapi.GetDebuginfoParams) middleware.Resp
 		dr.KernelVersion = fmt.Sprintf("%s", kver)
 	}
 
-	s := getHealthz{d}
-	status := s.getStatus(d)
+	status := d.getStatus(false)
 	dr.CiliumStatus = &status
 
 	var p endpoint.GetEndpointParams
 
-	dr.EndpointList = getEndpointList(p)
+	dr.EndpointList = d.getEndpointList(p)
 	dr.Policy = d.policy.GetRulesList()
-
+	dr.Subsystem = debug.CollectSubsystemStatus()
 	dr.CiliumMemoryMap = memoryMap(os.Getpid())
-
-	if d.nodeMonitor.State() != nil {
-		dr.CiliumNodemonitorMemoryMap = memoryMap(d.nodeMonitor.GetPid())
-	}
 
 	dr.EnvironmentVariables = []string{}
 	for _, k := range viper.AllKeys() {
@@ -76,7 +72,7 @@ func (h *getDebugInfo) Handle(params restapi.GetDebuginfoParams) middleware.Resp
 }
 
 func memoryMap(pid int) string {
-	m, err := exec.Command("cat", fmt.Sprintf("/proc/%d/maps", pid)).CombinedOutput()
+	m, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 	if err != nil {
 		return ""
 	}

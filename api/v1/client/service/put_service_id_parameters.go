@@ -6,10 +6,9 @@ package service
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"context"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
@@ -18,7 +17,7 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // NewPutServiceIDParams creates a new PutServiceIDParams object
@@ -69,7 +68,7 @@ type PutServiceIDParams struct {
 	  Service configuration
 
 	*/
-	Config *models.Service
+	Config *models.ServiceSpec
 	/*ID
 	  ID of service
 
@@ -115,13 +114,13 @@ func (o *PutServiceIDParams) SetHTTPClient(client *http.Client) {
 }
 
 // WithConfig adds the config to the put service ID params
-func (o *PutServiceIDParams) WithConfig(config *models.Service) *PutServiceIDParams {
+func (o *PutServiceIDParams) WithConfig(config *models.ServiceSpec) *PutServiceIDParams {
 	o.SetConfig(config)
 	return o
 }
 
 // SetConfig adds the config to the put service ID params
-func (o *PutServiceIDParams) SetConfig(config *models.Service) {
+func (o *PutServiceIDParams) SetConfig(config *models.ServiceSpec) {
 	o.Config = config
 }
 
@@ -144,12 +143,10 @@ func (o *PutServiceIDParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.
 	}
 	var res []error
 
-	if o.Config == nil {
-		o.Config = new(models.Service)
-	}
-
-	if err := r.SetBodyParam(o.Config); err != nil {
-		return err
+	if o.Config != nil {
+		if err := r.SetBodyParam(o.Config); err != nil {
+			return err
+		}
 	}
 
 	// path param id

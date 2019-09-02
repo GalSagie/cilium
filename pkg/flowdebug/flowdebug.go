@@ -25,9 +25,21 @@ func Enable() {
 	perFlowDebug = true
 }
 
-// Log must be used to log any debug messages emitted per request/message
-func Log(l *logrus.Entry, msg string) {
+// Enabled reports the status of per-flow debugging
+func Enabled() bool {
+	return perFlowDebug
+}
+
+// Log must be used to log any debug messages emitted per request/message/connection
+func Log(l *logrus.Entry, args ...interface{}) {
 	if perFlowDebug {
-		l.Debug(msg)
+		l.Debug(args...)
+	}
+}
+
+// Logf must be used to log any debug messages emitted per request/message/connection
+func Logf(l *logrus.Entry, format string, args ...interface{}) {
+	if perFlowDebug {
+		l.Debugf(format, args...)
 	}
 }

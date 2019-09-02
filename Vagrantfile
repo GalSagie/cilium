@@ -1,7 +1,21 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-Vagrant.require_version ">= 1.8.3"
+# The source of truth for vagrant box versions.
+# Sets SERVER_BOX, SERVER_VERSION, NETNEXT_SERVER_BOX and NETNEXT_SERVER_VERSION
+# Accepts overrides from env variables
+require_relative 'vagrant_box_defaults.rb'
+$SERVER_BOX = (ENV['SERVER_BOX'] || $SERVER_BOX)
+$SERVER_VERSION= (ENV['SERVER_VERSION'] || $SERVER_VERSION)
+$NETNEXT_SERVER_BOX = (ENV['NETNEXT_SERVER_BOX'] || $NETNEXT_SERVER_BOX)
+$NETNEXT_SERVER_VERSION= (ENV['NETNEXT_SERVER_VERSION'] || $NETNEXT_SERVER_VERSION)
+
+if ENV['NETNEXT'] == "true"
+    $SERVER_BOX = $NETNEXT_SERVER_BOX
+    $SERVER_VERSION = $NETNEXT_SERVER_VERSION
+end
+
+Vagrant.require_version ">= 2.0.0"
 
 if ARGV.first == "up" && ENV['CILIUM_SCRIPT'] != 'true'
     raise Vagrant::Errors::VagrantError.new, <<END
@@ -17,47 +31,29 @@ Disabling IPv4 is currently not allowed until k8s 1.9 is released
 END
 end
 
-# start.sh sets BAZEL_VERSION before calling us.
-BAZEL_VERSION = ENV['BAZEL_VERSION']
-
 $bootstrap = <<SCRIPT
-# This may be removed when the box images are based on Ubuntu 17.10+.
-sudo bash -c "cat <<EOF > /etc/apt/sources.list
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety main restricted
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety-updates main restricted
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety universe
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety-updates universe
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety multiverse
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety-updates multiverse
-deb http://old-releases.ubuntu.com/ubuntu/ yakkety-backports main restricted universe multiverse
-EOF
-"
+echo "----------------------------------------------------------------"
+export PATH=/home/vagrant/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games
+
+echo "editing journald configuration"
+sudo bash -c "echo RateLimitIntervalSec=1s >> /etc/systemd/journald.conf"
+sudo bash -c "echo RateLimitBurst=10000 >> /etc/systemd/journald.conf"
+echo "restarting systemd-journald"
+sudo systemctl restart systemd-journald
+echo "getting status of systemd-journald"
+sudo service systemd-journald status
+echo "done configuring journald"
+
 sudo service docker restart
-sudo apt-get -y update || true
-sudo apt-get -y install socat curl jq realpath pv tmux python-sphinx python-pip
-sudo pip install --upgrade pip
-sudo pip install sphinx sphinxcontrib-httpdomain sphinxcontrib-openapi
-sudo pip install yamllint
 echo 'cd ~/go/src/github.com/cilium/cilium' >> /home/vagrant/.bashrc
-export GOPATH=/home/vagrant/go
-sudo -E /usr/local/go/bin/go get github.com/cilium/go-bindata/...
-sudo -E /usr/local/go/bin/go get -u github.com/google/gops
-chown -R vagrant:vagrant $GOPATH
+sudo chown -R vagrant:vagrant /home/vagrant 2>/dev/null
 curl -SsL https://github.com/cilium/bpf-map/releases/download/v1.0/bpf-map -o bpf-map
 chmod +x bpf-map
 mv bpf-map /usr/bin
-if [[ $(command -v bazel) && "$(bazel version | grep 'label' | cut -d ' ' -f 3)" = #{BAZEL_VERSION} ]]; then
-  echo "Bazel #{BAZEL_VERSION} already installed, skipping fetch."
-else
-  wget -nv https://github.com/bazelbuild/bazel/releases/download/#{BAZEL_VERSION}/bazel-#{BAZEL_VERSION}-installer-linux-x86_64.sh
-  chmod +x bazel-#{BAZEL_VERSION}-installer-linux-x86_64.sh
-  sudo -E ./bazel-#{BAZEL_VERSION}-installer-linux-x86_64.sh
-  sudo -E mv /usr/local/bin/bazel /usr/bin
-  rm bazel-#{BAZEL_VERSION}-installer-linux-x86_64.sh
-fi
 SCRIPT
 
 $build = <<SCRIPT
+export PATH=/home/vagrant/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games
 ~/go/src/github.com/cilium/cilium/common/build.sh
 rm -fr ~/go/bin/cilium*
 SCRIPT
@@ -65,27 +61,19 @@ SCRIPT
 $install = <<SCRIPT
 sudo -E make -C /home/vagrant/go/src/github.com/cilium/cilium/ install
 
-if [ -n "$(grep DISTRIB_RELEASE=14.04 /etc/lsb-release)" ]; then
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/upstart/cilium-docker.conf /etc/init/
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/upstart/cilium.conf /etc/init/
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/upstart/cilium-consul.conf /etc/init/
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/upstart/cilium-policy-watcher.conf /etc/init/
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/upstart/cilium-etcd.conf /etc/init/
-    sudo rm -rf /var/log/upstart/cilium-*
-else
-    sudo mkdir -p /etc/sysconfig
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-consul.service /lib/systemd/system
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-docker.service /lib/systemd/system
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-etcd.service /lib/systemd/system
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium.service /lib/systemd/system
-    sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium /etc/sysconfig
-fi
+sudo mkdir -p /etc/sysconfig
+sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-consul.service /lib/systemd/system
+sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-docker.service /lib/systemd/system
+sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-etcd.service /lib/systemd/system
+sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium.service /lib/systemd/system
+sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium-operator.service /lib/systemd/system
+sudo cp /home/vagrant/go/src/github.com/cilium/cilium/contrib/systemd/cilium /etc/sysconfig
 
+getent group cilium >/dev/null || sudo groupadd -r cilium
 sudo usermod -a -G cilium vagrant
 SCRIPT
 
 $testsuite = <<SCRIPT
-make -C ~/go/src/github.com/cilium/cilium/ tests || exit 1
 sudo -E env PATH="${PATH}" make -C ~/go/src/github.com/cilium/cilium/ runtime-tests
 SCRIPT
 
@@ -109,14 +97,17 @@ $build_id = "#{$job_name}-#{$build_number}"
 # we can run VMs locally without having any the `build_id` in the name.
 if ENV['BUILD_NUMBER'] then
     $build_id_name = "-build-#{$build_id}"
-    $rsync_exclude = ".git"
-else
-    $rsync_exclude = "GIT_VERSION"
 end
 
 if ENV['K8S'] then
-    $k8stag = ENV['K8STAG'] || "-k8s"
+    $vm_base_name = "k8s"
+else
+    $vm_base_name = "runtime"
 end
+
+# Set locate to en_US.UTF-8
+ENV["LC_ALL"] = "en_US.UTF-8"
+ENV["LC_CTYPE"] = "en_US.UTF-8"
 
 # We need this workaround since kube-proxy is not aware of multiple network
 # interfaces. If we send a packet to a service IP that packet is sent
@@ -134,48 +125,65 @@ Vagrant.configure(2) do |config|
     config.vm.provision "build", type: "shell", run: "always", privileged: false, inline: $build
     config.vm.provision "install", type: "shell", run: "always", privileged: false, inline: $install
 
-    config.vm.provider :libvirt do |libvirt|
-        config.vm.box = "cilium/ubuntu-16.10"
-        config.vm.box_version = "2.0"
-        libvirt.memory = ENV['VM_MEMORY'].to_i
-        libvirt.cpus = ENV['VM_CPUS'].to_i
-        config.vm.synced_folder ".", "/home/vagrant/go/src/github.com/cilium/cilium", disabled: false
-    end
-
     config.vm.provider "virtualbox" do |vb|
         # Do not inherit DNS server from host, use proxy
         vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
         vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
 
-        config.vm.box = "cilium/ubuntu-16.10"
-	config.vm.box_version = "2.7"
+        # Prevent VirtualBox from interfering with host audio stack
+        vb.customize ["modifyvm", :id, "--audio", "none"]
+
+        config.vm.box = $SERVER_BOX
+        config.vm.box_version = $SERVER_VERSION
         vb.memory = ENV['VM_MEMORY'].to_i
         vb.cpus = ENV['VM_CPUS'].to_i
-
         if ENV["NFS"] then
-            config.vm.synced_folder '.', '/home/vagrant/go/src/github.com/cilium/cilium', type: "nfs"
+            mount_type = "nfs"
             # Don't forget to enable this ports on your host before starting the VM
             # in order to have nfs working
             # iptables -I INPUT -p udp -s 192.168.34.0/24 --dport 111 -j ACCEPT
             # iptables -I INPUT -p udp -s 192.168.34.0/24 --dport 2049 -j ACCEPT
             # iptables -I INPUT -p udp -s 192.168.34.0/24 --dport 20048 -j ACCEPT
         else
-            # run rsync with options:
-            #  --links: preserve symlinks
-            #  --checksum: skip based on checksum, not mod-time & size (avoid unnecessary bazel rebuilds)
-            #  --delete: delete extraneous files from dest dirs
-            #  --force: force deletion of dirs even if not empty
-            #  --delete-excluded: also delete excluded files from dest dirs
-            #  --archive: archive mode; equals -rlptgoD (no -H,-A,-X)
-            #  -z: compress file data during the transfer
-            config.vm.synced_folder '.', '/home/vagrant/go/src/github.com/cilium/cilium', type: "rsync",
-                rsync__exclude: [$rsync_exclude, "src"], rsync__args: ["--verbose", "--archive", "--delete", "--force", "--delete-excluded", "-z", "--links", "--checksum"]
+            mount_type = ""
+        end
+        config.vm.synced_folder '.', '/home/vagrant/go/src/github.com/cilium/cilium', type: mount_type
+        if ENV['USER_MOUNTS'] then
+            # Allow multiple mounts divided by commas
+            ENV['USER_MOUNTS'].split(",").each do |mnt|
+                # Split "<to>=<from>"
+                user_mount = mnt.split("=", 2)
+                # Only one element, assume a path relative to home directories in both ends
+                if user_mount.length == 1 then
+                    user_mount_to = "/home/vagrant/" + user_mount[0]
+                    user_mount_from = "~/" + user_mount[0]
+                else
+                    user_mount_to = user_mount[0]
+                    # Remove "~/" prefix if any.
+                    if user_mount_to.start_with?('~/') then
+                        user_mount_to[0..1] = ''
+                    end
+                    # Add home directory prefix for non-absolute paths
+                    if !user_mount_to.start_with?('/') then
+                        user_mount_to = "/home/vagrant/" + user_mount_to
+                    end
+                    user_mount_from = user_mount[1]
+                    # Add home prefix for host for any path in the project directory
+                    # as it is already mounted.
+                    if !user_mount_from.start_with?('/', '.', '~') then
+                        user_mount_from = "~/" + user_mount_from
+                    end
+                end
+                puts "Mounting host directory #{user_mount_from} as #{user_mount_to}"
+                config.vm.synced_folder "#{user_mount_from}", "#{user_mount_to}", type: mount_type
+            end
         end
     end
 
-    master_vm_name = "cilium#{$k8stag}-master#{$build_id_name}"
+    master_vm_name = "#{$vm_base_name}1#{$build_id_name}"
     config.vm.define master_vm_name, primary: true do |cm|
         node_ip = "#{$master_ip}"
+		cm.vm.network "forwarded_port", guest: 6443, host: 7443
         cm.vm.network "private_network", ip: "#{$master_ip}",
             virtualbox__intnet: "cilium-test-#{$build_id}",
             :libvirt__guest_ipv6 => "yes",
@@ -195,7 +203,7 @@ Vagrant.configure(2) do |config|
                 node_ip = "#{$master_ipv6}"
             end
         end
-        cm.vm.hostname = "cilium#{$k8stag}-master"
+        cm.vm.hostname = "#{$vm_base_name}1"
         if ENV['CILIUM_TEMP'] then
            if ENV["K8S"] then
                k8sinstall = "#{ENV['CILIUM_TEMP']}/cilium-k8s-install-1st-part.sh"
@@ -206,7 +214,7 @@ Vagrant.configure(2) do |config|
                    privileged: true,
                    path: k8sinstall
            end
-           script = "#{ENV['CILIUM_TEMP']}/cilium-master.sh"
+           script = "#{ENV['CILIUM_TEMP']}/node-1.sh"
            cm.vm.provision "config-install", type: "shell", privileged: true, run: "always", path: script
            # In k8s mode cilium needs etcd in order to run which was started in
            # the first part of the script. The 2nd part will install the
@@ -228,8 +236,8 @@ Vagrant.configure(2) do |config|
 
     $num_workers.times do |n|
         # n starts with 0
-        node_vm_name = "cilium#{$k8stag}-node-#{n+2}#{$build_id_name}"
-        node_hostname = "cilium#{$k8stag}-node-#{n+2}"
+        node_vm_name = "#{$vm_base_name}#{n+2}#{$build_id_name}"
+        node_hostname = "#{$vm_base_name}#{n+2}"
         config.vm.define node_vm_name do |node|
             node_ip = $workers_ipv4_addrs[n]
             node.vm.network "private_network", ip: "#{node_ip}",
@@ -250,10 +258,9 @@ Vagrant.configure(2) do |config|
                     node_ip = "#{ipv6_addr}"
                 end
             end
-            node.vm.hostname = "cilium#{$k8stag}-node-#{n+2}"
+            node.vm.hostname = "#{$vm_base_name}#{n+2}"
             if ENV['CILIUM_TEMP'] then
                 if ENV["K8S"] then
-                    node.vm.provision "kube-proxy-workaround", type: "shell", run: "always", inline: $kube_proxy_workaround
                     k8sinstall = "#{ENV['CILIUM_TEMP']}/cilium-k8s-install-1st-part.sh"
                     node.vm.provision "k8s-install-node-part-1",
                         type: "shell",
@@ -262,7 +269,7 @@ Vagrant.configure(2) do |config|
                         privileged: true,
                         path: k8sinstall
                 end
-                script = "#{ENV['CILIUM_TEMP']}/node-start-#{n+2}.sh"
+                script = "#{ENV['CILIUM_TEMP']}/node-#{n+2}.sh"
                 node.vm.provision "config-install", type: "shell", privileged: true, run: "always", path: script
                 if ENV["K8S"] then
                     k8sinstall = "#{ENV['CILIUM_TEMP']}/cilium-k8s-install-2nd-part.sh"

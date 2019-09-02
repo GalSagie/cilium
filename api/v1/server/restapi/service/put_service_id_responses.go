@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // PutServiceIDOKCode is the HTTP code returned for type PutServiceIDOK
@@ -25,11 +25,14 @@ type PutServiceIDOK struct {
 
 // NewPutServiceIDOK creates PutServiceIDOK with default headers values
 func NewPutServiceIDOK() *PutServiceIDOK {
+
 	return &PutServiceIDOK{}
 }
 
 // WriteResponse to the client
 func (o *PutServiceIDOK) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(200)
 }
@@ -46,11 +49,14 @@ type PutServiceIDCreated struct {
 
 // NewPutServiceIDCreated creates PutServiceIDCreated with default headers values
 func NewPutServiceIDCreated() *PutServiceIDCreated {
+
 	return &PutServiceIDCreated{}
 }
 
 // WriteResponse to the client
 func (o *PutServiceIDCreated) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(201)
 }
@@ -72,6 +78,7 @@ type PutServiceIDInvalidFrontend struct {
 
 // NewPutServiceIDInvalidFrontend creates PutServiceIDInvalidFrontend with default headers values
 func NewPutServiceIDInvalidFrontend() *PutServiceIDInvalidFrontend {
+
 	return &PutServiceIDInvalidFrontend{}
 }
 
@@ -94,7 +101,6 @@ func (o *PutServiceIDInvalidFrontend) WriteResponse(rw http.ResponseWriter, prod
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // PutServiceIDInvalidBackendCode is the HTTP code returned for type PutServiceIDInvalidBackend
@@ -114,6 +120,7 @@ type PutServiceIDInvalidBackend struct {
 
 // NewPutServiceIDInvalidBackend creates PutServiceIDInvalidBackend with default headers values
 func NewPutServiceIDInvalidBackend() *PutServiceIDInvalidBackend {
+
 	return &PutServiceIDInvalidBackend{}
 }
 
@@ -136,7 +143,6 @@ func (o *PutServiceIDInvalidBackend) WriteResponse(rw http.ResponseWriter, produ
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // PutServiceIDFailureCode is the HTTP code returned for type PutServiceIDFailure
@@ -156,6 +162,7 @@ type PutServiceIDFailure struct {
 
 // NewPutServiceIDFailure creates PutServiceIDFailure with default headers values
 func NewPutServiceIDFailure() *PutServiceIDFailure {
+
 	return &PutServiceIDFailure{}
 }
 
@@ -178,5 +185,4 @@ func (o *PutServiceIDFailure) WriteResponse(rw http.ResponseWriter, producer run
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }

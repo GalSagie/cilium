@@ -20,10 +20,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cilium/cilium/pkg/envoy/api"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 
-	"github.com/cilium/cilium/pkg/lock"
+	envoy_api_v2_core "github.com/cilium/proxy/go/envoy/api/v2/core"
 	"github.com/sirupsen/logrus"
 )
 
@@ -40,6 +40,7 @@ type ResourceWatcher struct {
 
 	// version is the current version of the resources. Updated in calls to
 	// NotifyNewVersion.
+	// Versioning starts at 1.
 	version uint64
 
 	// versionLocker is used to lock all accesses to version.
@@ -59,6 +60,7 @@ type ResourceWatcher struct {
 // resource set.
 func NewResourceWatcher(typeURL string, resourceSet ResourceSource, resourceAccessTimeout time.Duration) *ResourceWatcher {
 	w := &ResourceWatcher{
+		version:               1,
 		typeURL:               typeURL,
 		resourceSet:           resourceSet,
 		resourceAccessTimeout: resourceAccessTimeout,
@@ -97,7 +99,7 @@ func (w *ResourceWatcher) HandleNewResourceVersion(typeURL string, version uint6
 // lastVersion is the last version successfully applied by the
 // client; nil if this is the first request for resources.
 // This method call must always close the out channel.
-func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, lastVersion *uint64, node *api.Node,
+func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, lastVersion uint64, node *envoy_api_v2_core.Node,
 	resourceNames []string, out chan<- *VersionedResources) {
 	defer close(out)
 
@@ -111,13 +113,32 @@ func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, la
 
 	var waitVersion uint64
 	var waitForVersion bool
-	if lastVersion != nil {
+	if lastVersion != 0 {
 		waitForVersion = true
-		waitVersion = *lastVersion
+		waitVersion = lastVersion
 	}
 
 	for ctx.Err() == nil && res == nil {
 		w.versionLocker.Lock()
+		// If the client ACKed a version that we have never sent back, this
+		// indicates that this server restarted but the client survived and had
+		// received a higher version number from the previous server instance.
+		// Bump the resource set's version number to match the client's and
+		// send a response immediately.
+		if waitForVersion && w.version < waitVersion {
+			w.versionLocker.Unlock()
+			// Calling EnsureVersion will increase the version of the resource
+			// set, which in turn will callback w.HandleNewResourceVersion with
+			// that new version number. In order for that callback to not
+			// deadlock, temporarily unlock w.versionLocker.
+			// The w.HandleNewResourceVersion callback will update w.version to
+			// the new resource set version.
+			w.resourceSet.EnsureVersion(typeURL, waitVersion+1)
+			w.versionLocker.Lock()
+		}
+
+		// Re-check w.version, since it may have been modified by calling
+		// EnsureVersion above.
 		for ctx.Err() == nil && waitForVersion && w.version <= waitVersion {
 			watchLog.Debugf("current resource version is %d, waiting for it to become > %d", w.version, waitVersion)
 			w.versionCond.Wait()

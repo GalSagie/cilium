@@ -15,33 +15,27 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
-	"text/tabwriter"
 
 	"github.com/cilium/cilium/common"
-	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/command"
-	"github.com/cilium/cilium/pkg/proxy"
-
 	"github.com/spf13/cobra"
 )
 
 const (
-	proxyTitle       = "PROXY"
-	destinationTitle = "DESTINATION"
+	proxyTitle       = "KEY"
+	destinationTitle = "VALUE"
 )
-
-var proxyList = map[string]string{}
 
 // bpfProxyListCmd represents the bpf_proxy_list command
 var bpfProxyListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List proxy configuration",
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List proxy configuration (deprecated)",
 	Run: func(cmd *cobra.Command, args []string) {
 		common.RequireRootPrivilege("cilium bpf proxy list")
-		proxy.Dump(dumpProxy4)
-		proxy.Dump6(dumpProxy6)
+
+		proxyList := make(map[string][]string)
 
 		if command.OutputJSON() {
 			if err := command.PrintOutput(proxyList); err != nil {
@@ -50,30 +44,11 @@ var bpfProxyListCmd = &cobra.Command{
 			return
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
-
-		fmt.Fprintf(w, "%s\t%s\t\n", proxyTitle, destinationTitle)
-		for k, v := range proxyList {
-			fmt.Fprintf(w, "%s\t%s\t\n", k, v)
-		}
-
-		w.Flush()
+		TablePrinter(proxyTitle, destinationTitle, proxyList)
 	},
 }
 
 func init() {
 	bpfProxyCmd.AddCommand(bpfProxyListCmd)
 	command.AddJSONOutput(bpfProxyListCmd)
-}
-
-func dumpProxy4(key bpf.MapKey, value bpf.MapValue) {
-	proxyKey := key.(*proxy.Proxy4Key)
-	proxyValue := value.(*proxy.Proxy4Value)
-	proxyList[proxyKey.String()] = proxyValue.String()
-}
-
-func dumpProxy6(key bpf.MapKey, value bpf.MapValue) {
-	proxyKey := key.(*proxy.Proxy6Key)
-	proxyValue := value.(*proxy.Proxy6Value)
-	proxyList[proxyKey.String()] = proxyValue.String()
 }

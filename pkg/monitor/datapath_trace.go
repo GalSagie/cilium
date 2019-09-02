@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2018 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,15 @@
 package monitor
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
 const (
 	// TraceNotifyLen is the amount of packet data provided in a trace notification
 	TraceNotifyLen = 32
+	// TraceReasonEncryptMask is the bit used to indicate encryption or not
+	TraceReasonEncryptMask uint8 = 0x80
 )
 
 // TraceNotify is the message format of a trace notification in the BPF ring buffer
@@ -52,6 +55,7 @@ const (
 	TraceFromHost
 	TraceFromStack
 	TraceFromOverlay
+	TraceFromNetwork
 )
 
 var traceObsPoints = map[uint8]string{
@@ -65,6 +69,7 @@ var traceObsPoints = map[uint8]string{
 	TraceFromHost:    "from-host",
 	TraceFromStack:   "from-stack",
 	TraceFromOverlay: "from-overlay",
+	TraceFromNetwork: "from-network",
 }
 
 func obsPoint(obsPoint uint8) string {
@@ -90,10 +95,22 @@ var traceReasons = map[uint8]string{
 }
 
 func connState(reason uint8) string {
-	if str, ok := traceReasons[reason]; ok {
+	r := reason & ^TraceReasonEncryptMask
+	if str, ok := traceReasons[r]; ok {
 		return str
 	}
 	return fmt.Sprintf("%d", reason)
+}
+
+func (n *TraceNotify) encryptReason() string {
+	if (n.Reason & TraceReasonEncryptMask) != 0 {
+		return fmt.Sprintf("encrypted ")
+	}
+	return ""
+}
+
+func (n *TraceNotify) traceReason() string {
+	return connState(n.Reason)
 }
 
 func (n *TraceNotify) traceSummary() string {
@@ -118,6 +135,8 @@ func (n *TraceNotify) traceSummary() string {
 		return "<- stack"
 	case TraceFromOverlay:
 		return "<- overlay"
+	case TraceFromNetwork:
+		return "<- network"
 	default:
 		return "unknown trace"
 	}
@@ -125,15 +144,21 @@ func (n *TraceNotify) traceSummary() string {
 
 // DumpInfo prints a summary of the trace messages.
 func (n *TraceNotify) DumpInfo(data []byte) {
-	fmt.Printf("%s flow %#x identity %d->%d state %s ifindex %s: %s\n",
-		n.traceSummary(), n.Hash, n.SrcLabel, n.DstLabel,
-		connState(n.Reason), ifname(int(n.Ifindex)), GetConnectionSummary(data[TraceNotifyLen:]))
+	if n.encryptReason() != "" {
+		fmt.Printf("%s %s flow %#x identity %d->%d state %s ifindex %s: %s\n",
+			n.traceSummary(), n.encryptReason(), n.Hash, n.SrcLabel, n.DstLabel,
+			n.traceReason(), ifname(int(n.Ifindex)), GetConnectionSummary(data[TraceNotifyLen:]))
+	} else {
+		fmt.Printf("%s flow %#x identity %d->%d state %s ifindex %s: %s\n",
+			n.traceSummary(), n.Hash, n.SrcLabel, n.DstLabel,
+			n.traceReason(), ifname(int(n.Ifindex)), GetConnectionSummary(data[TraceNotifyLen:]))
+	}
 }
 
 // DumpVerbose prints the trace notification in human readable form
 func (n *TraceNotify) DumpVerbose(dissect bool, data []byte, prefix string) {
-	fmt.Printf("%s MARK %#x FROM %d %s: %d bytes, state %s",
-		prefix, n.Hash, n.Source, obsPoint(n.ObsPoint), n.OrigLen, connState(n.Reason))
+	fmt.Printf("%s MARK %#x FROM %d %s: %d bytes (%d captured), state %s",
+		prefix, n.Hash, n.Source, obsPoint(n.ObsPoint), n.OrigLen, n.CapLen, connState(n.Reason))
 
 	if n.Ifindex != 0 {
 		fmt.Printf(", interface %s", ifname(int(n.Ifindex)))
@@ -151,5 +176,60 @@ func (n *TraceNotify) DumpVerbose(dissect bool, data []byte, prefix string) {
 
 	if n.CapLen > 0 && len(data) > TraceNotifyLen {
 		Dissect(dissect, data[TraceNotifyLen:])
+	}
+}
+
+func (n *TraceNotify) getJSON(data []byte, cpuPrefix string) (string, error) {
+	v := TraceNotifyToVerbose(n)
+	v.CPUPrefix = cpuPrefix
+	if n.CapLen > 0 && len(data) > TraceNotifyLen {
+		v.Summary = GetDissectSummary(data[TraceNotifyLen:])
+	}
+
+	ret, err := json.Marshal(v)
+	return string(ret), err
+}
+
+// DumpJSON prints notification in json format
+func (n *TraceNotify) DumpJSON(data []byte, cpuPrefix string) {
+	resp, err := n.getJSON(data, cpuPrefix)
+	if err == nil {
+		fmt.Println(resp)
+	}
+}
+
+// TraceNotifyVerbose represents a json notification printed by monitor
+type TraceNotifyVerbose struct {
+	CPUPrefix        string `json:"cpu,omitempty"`
+	Type             string `json:"type,omitempty"`
+	Mark             string `json:"mark,omitempty"`
+	Ifindex          string `json:"ifindex,omitempty"`
+	State            string `json:"state,omitempty"`
+	ObservationPoint string `json:"observationPoint"`
+	TraceSummary     string `json:"traceSummary"`
+
+	Source   uint16 `json:"source"`
+	Bytes    uint32 `json:"bytes"`
+	SrcLabel uint32 `json:"srcLabel"`
+	DstLabel uint32 `json:"dstLabel"`
+	DstID    uint16 `json:"dstID"`
+
+	Summary *DissectSummary `json:"summary,omitempty"`
+}
+
+// TraceNotifyToVerbose creates verbose notification from base TraceNotify
+func TraceNotifyToVerbose(n *TraceNotify) TraceNotifyVerbose {
+	return TraceNotifyVerbose{
+		Type:             "trace",
+		Mark:             fmt.Sprintf("%#x", n.Hash),
+		Ifindex:          ifname(int(n.Ifindex)),
+		State:            connState(n.Reason),
+		ObservationPoint: obsPoint(n.ObsPoint),
+		TraceSummary:     n.traceSummary(),
+		Source:           n.Source,
+		Bytes:            n.OrigLen,
+		SrcLabel:         n.SrcLabel,
+		DstLabel:         n.DstLabel,
+		DstID:            n.DstID,
 	}
 }

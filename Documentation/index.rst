@@ -1,3 +1,9 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 Welcome to Cilium's documentation!
 ==================================
 
@@ -7,12 +13,15 @@ The documentation is divided into the following sections:
   setup on your laptop.  Intended as an easy way to get your hands dirty
   applying Cilium security policies between containers.
 
-* :ref:`arch_guide`: Describes the components of the Cilium architecture,
+* :ref:`concepts`: Describes the components of Cilium,
   and the different models for deploying Cilium.  Provides the high-level
   understanding required to run a full Cilium deployment and understand its
   behavior.
 
-* :ref:`install_guide` :  Details instructions for installing, configuring, and
+* :ref:`arch_guide`: Describes the components of the Cilium architecture and
+  how these components integrate with existing architectures, such as Kubernetes.
+
+* :ref:`gs_install` :  Details instructions for installing, configuring, and
   troubleshooting Cilium in different deployment modes.
 
 * :ref:`policy_guide` : Detailed walkthrough of the policy language structure
@@ -38,7 +47,8 @@ The documentation is divided into the following sections:
 
    intro
    gettingstarted/index
-   concepts
+   concepts/index
+   architecture
    gettinghelp
 
 .. toctree::
@@ -49,13 +59,14 @@ The documentation is divided into the following sections:
    istio/index
    docker/index
    mesos/index
+   envoy/index
 
 .. toctree::
    :maxdepth: 2
-   :caption: Installation
+   :caption: Administration
 
    install/system_requirements
-   install/guides/index
+   install/upgrade
 
 .. toctree::
    :maxdepth: 2
@@ -68,9 +79,17 @@ The documentation is divided into the following sections:
 
 .. toctree::
    :maxdepth: 2
+   :caption: Community
+
+   community
+
+.. toctree::
+   :maxdepth: 2
    :caption: For Developers
 
-   contributing
+   contributing/contributing
+   contributing/release
+   contributing/ci
    bpf
    api
 
@@ -80,5 +99,7 @@ The documentation is divided into the following sections:
 
    cheatsheet
    cmdref/index
+   kvstore
    further_reading
    glossary
+

@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,11 +22,12 @@ import (
 
 	. "github.com/cilium/cilium/api/v1/client/policy"
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/common"
+	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/command"
-	"github.com/cilium/cilium/pkg/endpoint"
+	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/k8s"
-	"github.com/cilium/cilium/pkg/policy"
+	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
 	"github.com/cilium/cilium/pkg/policy/trace"
 
 	"github.com/spf13/cobra"
@@ -51,7 +52,8 @@ var policyTraceCmd = &cobra.Command{
 destination. Source / destination can be provided as endpoint ID, security ID, Kubernetes Pod, YAML file, set of LABELs. LABEL is represented as
 SOURCE:KEY[=VALUE].
 dports can be can be for example: 80/tcp, 53 or 23/udp.
-If multiple sources and / or destinations are provided, each source is tested whether there is a policy allowing traffic between it and each destination`,
+If multiple sources and / or destinations are provided, each source is tested whether there is a policy allowing traffic between it and each destination.
+--src-k8s-pod and --dst-k8s-pod requires cilium-agent to be running with disable-endpoint-crd option set to "false".`,
 	Run: func(cmd *cobra.Command, args []string) {
 
 		srcSlices := [][]string{}
@@ -96,12 +98,12 @@ If multiple sources and / or destinations are provided, each source is tested wh
 
 		// Parse security identities.
 		if srcIdentity != defaultSecurityID {
-			srcSlice = appendIdentityLabelsToSlice(srcSlice, policy.NumericIdentity(srcIdentity).StringID())
+			srcSlice = appendIdentityLabelsToSlice(srcSlice, identity.NumericIdentity(srcIdentity).StringID())
 			srcSlices = append(srcSlices, srcSlice)
 		}
 
 		if dstIdentity != defaultSecurityID {
-			dstSlice = appendIdentityLabelsToSlice(dstSlice, policy.NumericIdentity(dstIdentity).StringID())
+			dstSlice = appendIdentityLabelsToSlice(dstSlice, identity.NumericIdentity(dstIdentity).StringID())
 			dstSlices = append(dstSlices, dstSlice)
 		}
 
@@ -158,14 +160,18 @@ If multiple sources and / or destinations are provided, each source is tested wh
 
 		for _, v := range srcSlices {
 			for _, w := range dstSlices {
-				search := models.IdentityContext{
-					From:    v,
-					To:      w,
-					Dports:  dPorts,
+				search := models.TraceSelector{
+					From: &models.TraceFrom{
+						Labels: v,
+					},
+					To: &models.TraceTo{
+						Labels: w,
+						Dports: dPorts,
+					},
 					Verbose: verbose,
 				}
 
-				params := NewGetPolicyResolveParams().WithIdentityContext(&search)
+				params := NewGetPolicyResolveParams().WithTraceSelector(&search).WithTimeout(api.ClientTimeout)
 				if scr, err := client.Policy.GetPolicyResolve(params); err != nil {
 					Fatalf("Error while retrieving policy assessment result: %s\n", err)
 				} else if command.OutputJSON() {
@@ -212,7 +218,13 @@ func appendEpLabelsToSlice(labelSlice []string, epID string) []string {
 	if err != nil {
 		Fatalf("Cannot get endpoint corresponding to identifier %s: %s\n", epID, err)
 	}
-	return append(labelSlice, ep.Identity.Labels...)
+
+	lbls := []string{}
+	if ep.Status != nil && ep.Status.Identity != nil && ep.Status.Identity.Labels != nil {
+		lbls = ep.Status.Identity.Labels
+	}
+
+	return append(labelSlice, lbls...)
 }
 
 func parseLabels(slice []string) ([]string, error) {
@@ -223,8 +235,8 @@ func parseLabels(slice []string) ([]string, error) {
 }
 
 func getSecIDFromK8s(podName string) (string, error) {
-	fmtdPodName := endpoint.NewID(endpoint.PodNamePrefix, podName)
-	_, _, err := endpoint.ValidateID(fmtdPodName)
+	fmtdPodName := endpointid.NewID(endpointid.PodNamePrefix, podName)
+	_, _, err := endpointid.Parse(fmtdPodName)
 	if err != nil {
 		Fatalf("Cannot parse pod name \"%s\": %s", fmtdPodName, err)
 	}
@@ -245,26 +257,26 @@ func getSecIDFromK8s(podName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("unable to create rest configuration: %s", err)
 	}
-	k8sClient, err := k8s.CreateClient(restConfig)
+	ciliumK8sClient, err := clientset.NewForConfig(restConfig)
 	if err != nil {
 		return "", fmt.Errorf("unable to create k8s client: %s", err)
 	}
 
-	p, err := k8sClient.CoreV1().Pods(namespace).Get(pod, meta_v1.GetOptions{})
+	ep, err := ciliumK8sClient.CiliumV2().CiliumEndpoints(namespace).Get(pod, meta_v1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("unable to get pod %s in namespace %s", pod, namespace)
 	}
 
-	secID := p.GetAnnotations()[common.CiliumIdentityAnnotation]
-	if secID == "" {
-		return "", fmt.Errorf("cilium-identity annotation not set for pod %s in namespace %s", pod, namespace)
+	if ep.Status.Identity == nil {
+		return "", fmt.Errorf("cilium security identity"+
+			" not set for pod %s in namespace %s", pod, namespace)
 	}
 
-	return secID, nil
+	return strconv.Itoa(int(ep.Status.Identity.ID)), nil
 }
 
 // parseL4PortsSlice parses a given `slice` of strings. Each string should be in
-// the form of `<port>[/<protocol>]`, where the `<port>` in an integer and an
+// the form of `<port>[/<protocol>]`, where the `<port>` is an integer and
 // `<protocol>` is an optional layer 4 protocol `tcp` or `udp`. In case
 // `protocol` is not present, or is set to `any`, the parsed port will be set to
 // `models.PortProtocolAny`.

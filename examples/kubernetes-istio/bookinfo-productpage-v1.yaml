@@ -33,23 +33,23 @@ specs:
         rules:
           http:
           - method: GET
-            path: "^/$"
+            path: "/"
           - method: GET
-            path: "^/index.html$"
+            path: "/index.html"
           - method: POST
-            path: "^/login$"
+            path: "/login"
           - method: GET
-            path: "^/logout$"
+            path: "/logout"
           - method: GET
-            path: "^/productpage$"
+            path: "/productpage"
           - method: GET
-            path: "^/api/v1/products$"
+            path: "/api/v1/products"
           - method: GET
-            path: "^/api/v1/products/[0-9]*$"
+            path: "/api/v1/products/[0-9]*"
           - method: GET
-            path: "^/api/v1/products/[0-9]*/reviews$"
+            path: "/api/v1/products/[0-9]*/reviews"
           - method: GET
-            path: "^/api/v1/products/[0-9]*/ratings$"
+            path: "/api/v1/products/[0-9]*/ratings"
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
@@ -59,13 +59,16 @@ spec:
   replicas: 1
   template:
     metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
       labels:
         app: productpage
         version: v1
     spec:
       containers:
       - name: productpage
-        image: istio/examples-bookinfo-productpage-v1:0.2.8
+        image: docker.io/istio/examples-bookinfo-productpage-v1:1.10.1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9080
+---

@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package policy
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -34,11 +35,15 @@ const (
 	TRACE_VERBOSE
 )
 
+// TraceEnabled returns true if the SearchContext requests tracing.
+func (s *SearchContext) TraceEnabled() bool {
+	return s.Trace != TRACE_DISABLED
+}
+
 // PolicyTrace logs the given message into the SearchContext logger only if
 // TRACE_ENABLED or TRACE_VERBOSE is enabled in the receiver's SearchContext.
 func (s *SearchContext) PolicyTrace(format string, a ...interface{}) {
-	switch s.Trace {
-	case TRACE_ENABLED, TRACE_VERBOSE:
+	if s.TraceEnabled() {
 		log.Debugf(format, a...)
 		if s.Logging != nil {
 			format = "%-" + s.CallDepth() + "s" + format
@@ -68,11 +73,11 @@ type SearchContext struct {
 	From    labels.LabelArray
 	To      labels.LabelArray
 	DPorts  []*models.Port
-
-	// IngressL4Only is true if only ingress L4 policy should be evaluated
-	IngressL4Only bool
-	// EgressL4Only is true if only egress L4 policy should be evaluated
-	EgressL4Only bool
+	// rulesSelect specifies whether or not to check whether a rule which is
+	// being analyzed using this SearchContext matches either From or To.
+	// This is used to avoid using EndpointSelector.Matches() if possible,
+	// since it is costly in terms of performance.
+	rulesSelect bool
 }
 
 func (s *SearchContext) String() string {
@@ -100,7 +105,18 @@ func (s *SearchContext) CallDepth() string {
 	return strconv.Itoa(s.Depth * 2)
 }
 
+// WithLogger returns a shallow copy of the received SearchContext with the
+// logging set to write to 'log'.
+func (s *SearchContext) WithLogger(log io.Writer) *SearchContext {
+	result := *s
+	result.Logging = logging.NewLogBackend(log, "", 0)
+	if result.Trace == TRACE_DISABLED {
+		result.Trace = TRACE_ENABLED
+	}
+	return &result
+}
+
 // Translator is an interface for altering policy rules
 type Translator interface {
-	Translate(*api.Rule) error
+	Translate(*api.Rule, *TranslationResult) error
 }

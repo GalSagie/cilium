@@ -13,7 +13,7 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // GetConfigReader is a Reader for the GetConfig structure.
@@ -47,7 +47,7 @@ func NewGetConfigOK() *GetConfigOK {
 Success
 */
 type GetConfigOK struct {
-	Payload *models.DaemonConfigurationResponse
+	Payload *models.DaemonConfiguration
 }
 
 func (o *GetConfigOK) Error() string {
@@ -56,7 +56,7 @@ func (o *GetConfigOK) Error() string {
 
 func (o *GetConfigOK) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
-	o.Payload = new(models.DaemonConfigurationResponse)
+	o.Payload = new(models.DaemonConfiguration)
 
 	// response payload
 	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {

@@ -32,8 +32,7 @@ const (
 // Ping returns the string representing the ping command to ping the specified
 // endpoint.
 func Ping(endpoint string) string {
-	// TODO: add W -2 ?
-	return fmt.Sprintf("ping -c %d %s", PingCount, endpoint)
+	return fmt.Sprintf("ping -W 2 -c %d %s", PingCount, endpoint)
 }
 
 // Ping6 returns the string representing the ping6 command to ping6 the
@@ -42,10 +41,33 @@ func Ping6(endpoint string) string {
 	return fmt.Sprintf("ping6 -c %d %s", PingCount, endpoint)
 }
 
-// CurlFail returns the string representing the curl command with `-s` and `--fail`
-// options enabled to curl the specified endpoint.
-func CurlFail(endpoint string) string {
-	return fmt.Sprintf("curl -s --fail --connect-timeout %[1]d --max-time %[1]d %[2]s",
+// CurlFail returns the string representing the curl command with `-s` and
+// `--fail` options enabled to curl the specified endpoint.  It takes a
+// variadic optinalValues argument. This is passed on to fmt.Sprintf() and uses
+// into the curl message
+func CurlFail(endpoint string, optionalValues ...interface{}) string {
+	statsInfo := `time-> DNS: '%{time_namelookup}(%{remote_ip})', Connect: '%{time_connect}',` +
+		`Transfer '%{time_starttransfer}', total '%{time_total}'`
+
+	if len(optionalValues) > 0 {
+		endpoint = fmt.Sprintf(endpoint, optionalValues...)
+	}
+	return fmt.Sprintf(
+		`curl --path-as-is -s -D /dev/stderr --fail --connect-timeout %[1]d --max-time %[2]d %[3]s -w "%[4]s"`,
+		CurlConnectTimeout, CurlMaxTimeout, endpoint, statsInfo)
+}
+
+// CurlWithHTTPCode retunrs the string representation of the curl command which
+// only outputs the HTTP code returned by its execution against the specified
+// endpoint. It takes a variadic optinalValues argument. This is passed on to
+// fmt.Sprintf() and uses into the curl message
+func CurlWithHTTPCode(endpoint string, optionalValues ...interface{}) string {
+	if len(optionalValues) > 0 {
+		endpoint = fmt.Sprintf(endpoint, optionalValues...)
+	}
+
+	return fmt.Sprintf(
+		`curl --path-as-is -s  -D /dev/stderr --output /dev/stderr -w '%%{http_code}' --connect-timeout %d %s`,
 		CurlConnectTimeout, endpoint)
 }
 
@@ -53,4 +75,14 @@ func CurlFail(endpoint string) string {
 // connectivity between endpoints.
 func Netperf(endpoint string, perfTest PerfTest) string {
 	return fmt.Sprintf("netperf -l 3 -t %s -H %s", perfTest, endpoint)
+}
+
+// Netcat returns the string representing the netcat command to the specified
+// endpoint. It takes a variadic optionalValues arguments, This is passed to
+// fmt.Sprintf uses in the netcat message
+func Netcat(endpoint string, optionalValues ...interface{}) string {
+	if len(optionalValues) > 0 {
+		endpoint = fmt.Sprintf(endpoint, optionalValues...)
+	}
+	return fmt.Sprintf("nc -w 4 %s", endpoint)
 }

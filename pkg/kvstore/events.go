@@ -14,7 +14,11 @@
 
 package kvstore
 
-// EventType defines the type of watch event that occured
+import (
+	"sync"
+)
+
+// EventType defines the type of watch event that occurred
 type EventType int
 
 const (
@@ -46,7 +50,7 @@ func (t EventType) String() string {
 
 // KeyValueEvent is a change event for a Key/Value pair
 type KeyValueEvent struct {
-	// Typ is the type of event { EventTypeCreate | EventTypeModify | EventTypeDelete }
+	// Typ is the type of event { EventTypeCreate | EventTypeModify | EventTypeDelete | EventTypeListDone }
 	Typ EventType
 
 	// Key is the kvstore key that changed
@@ -62,10 +66,6 @@ type EventChan chan KeyValueEvent
 // stopChan is the channel used to indicate stopping of the watcher
 type stopChan chan struct{}
 
-// signalChan is used to signal readiness, the purpose is specific to the
-// individual functions
-type signalChan chan struct{}
-
 // Watcher represents a KVstore watcher
 type Watcher struct {
 	// Events is the channel to which change notifications will be sent to
@@ -75,7 +75,24 @@ type Watcher struct {
 	prefix    string
 	stopWatch stopChan
 
-	stopped bool
+	// stopOnce guarantees that Stop() is only called once
+	stopOnce sync.Once
+
+	// stopWait is the wait group to wait for watchers to exit gracefully
+	stopWait sync.WaitGroup
+}
+
+func newWatcher(name, prefix string, chanSize int) *Watcher {
+	w := &Watcher{
+		name:      name,
+		prefix:    prefix,
+		Events:    make(EventChan, chanSize),
+		stopWatch: make(stopChan),
+	}
+
+	w.stopWait.Add(1)
+
+	return w
 }
 
 // String returns the name of the wather
@@ -93,27 +110,14 @@ func (w *Watcher) String() string {
 // Returns a watcher structure plus a channel that is closed when the initial
 // list operation has been completed
 func ListAndWatch(name, prefix string, chanSize int) *Watcher {
-	w := &Watcher{
-		name:      name,
-		prefix:    prefix,
-		Events:    make(EventChan, chanSize),
-		stopWatch: make(stopChan, 0),
-	}
-
-	log.WithField(fieldWatcher, w).Debug("Starting watcher...")
-
-	go Client().Watch(w)
-
-	return w
+	return Client().ListAndWatch(name, prefix, chanSize)
 }
 
 // Stop stops a watcher previously created and started with Watch()
 func (w *Watcher) Stop() {
-	if w.stopped {
-		return
-	}
-
-	close(w.stopWatch)
-	log.WithField(fieldWatcher, w).Debug("Stopped watcher...")
-	w.stopped = true
+	w.stopOnce.Do(func() {
+		close(w.stopWatch)
+		log.WithField(fieldWatcher, w).Debug("Stopped watcher")
+		w.stopWait.Wait()
+	})
 }

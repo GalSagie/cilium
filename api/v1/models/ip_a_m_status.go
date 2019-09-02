@@ -14,31 +14,27 @@ import (
 
 // IPAMStatus Status of IP address management
 // swagger:model IPAMStatus
-
+// +k8s:deepcopy-gen=true
 type IPAMStatus struct {
+
+	// allocations
+	Allocations AllocationMap `json:"allocations,omitempty"`
 
 	// ipv4
 	IPV4 []string `json:"ipv4"`
 
 	// ipv6
 	IPV6 []string `json:"ipv6"`
+
+	// status
+	Status string `json:"status,omitempty"`
 }
-
-/* polymorph IPAMStatus ipv4 false */
-
-/* polymorph IPAMStatus ipv6 false */
 
 // Validate validates this IP a m status
 func (m *IPAMStatus) Validate(formats strfmt.Registry) error {
 	var res []error
 
-	if err := m.validateIPV4(formats); err != nil {
-		// prop
-		res = append(res, err)
-	}
-
-	if err := m.validateIPV6(formats); err != nil {
-		// prop
+	if err := m.validateAllocations(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -48,19 +44,17 @@ func (m *IPAMStatus) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
-func (m *IPAMStatus) validateIPV4(formats strfmt.Registry) error {
+func (m *IPAMStatus) validateAllocations(formats strfmt.Registry) error {
 
-	if swag.IsZero(m.IPV4) { // not required
+	if swag.IsZero(m.Allocations) { // not required
 		return nil
 	}
 
-	return nil
-}
-
-func (m *IPAMStatus) validateIPV6(formats strfmt.Registry) error {
-
-	if swag.IsZero(m.IPV6) { // not required
-		return nil
+	if err := m.Allocations.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("allocations")
+		}
+		return err
 	}
 
 	return nil

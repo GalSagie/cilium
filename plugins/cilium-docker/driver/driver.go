@@ -19,16 +19,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"time"
 
-	"github.com/cilium/cilium/api/v1/client/endpoint"
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/common/addressing"
-	"github.com/cilium/cilium/common/plugins"
 	"github.com/cilium/cilium/pkg/client"
-	endpointPkg "github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/datapath/link"
+	"github.com/cilium/cilium/pkg/datapath/linux/route"
+	"github.com/cilium/cilium/pkg/endpoint/connector"
+	endpointIDPkg "github.com/cilium/cilium/pkg/endpoint/id"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/docker/libnetwork/drivers/remote/api"
 	lnTypes "github.com/docker/libnetwork/types"
@@ -37,7 +40,7 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-var log = logging.DefaultLogger
+var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "cilium-docker-driver")
 
 const (
 	// ContainerInterfacePrefix is the container's internal interface name prefix.
@@ -50,18 +53,19 @@ type Driver interface {
 }
 
 type driver struct {
+	mutex       lock.RWMutex
 	client      *client.Client
-	conf        models.DaemonConfigurationResponse
+	conf        models.DaemonConfigurationStatus
 	routes      []api.StaticRoute
 	gatewayIPv6 string
 	gatewayIPv4 string
 }
 
 func endpointID(id string) string {
-	return endpointPkg.NewID(endpointPkg.DockerEndpointPrefix, id)
+	return endpointIDPkg.NewID(endpointIDPkg.DockerEndpointPrefix, id)
 }
 
-func newLibnetworkRoute(route plugins.Route) api.StaticRoute {
+func newLibnetworkRoute(route route.Route) api.StaticRoute {
 	rt := api.StaticRoute{
 		Destination: route.Prefix.String(),
 		RouteType:   lnTypes.CONNECTED,
@@ -75,8 +79,15 @@ func newLibnetworkRoute(route plugins.Route) api.StaticRoute {
 	return rt
 }
 
-// NewDriver creates and returns a new Driver for the given API URL
+// NewDriver creates and returns a new Driver for the given API URL.
+// If url is nil then use SockPath provided by CILIUM_SOCK
+// or the cilium default SockPath
 func NewDriver(url string) (Driver, error) {
+
+	if url == "" {
+		url = client.DefaultSockPath()
+	}
+
 	scopedLog := log.WithField("url", url)
 	c, err := client.NewClient(url)
 	if err != nil {
@@ -94,47 +105,59 @@ func NewDriver(url string) (Driver, error) {
 			}
 			time.Sleep(time.Duration(tries) * time.Second)
 		} else {
-			if res.Addressing == nil || res.Addressing.IPV6 == nil {
+			if res.Status.Addressing == nil || (res.Status.Addressing.IPV4 == nil && res.Status.Addressing.IPV6 == nil) {
 				scopedLog.Fatal("Invalid addressing information from daemon")
 			}
 
-			d.conf = *res
+			d.conf = *res.Status
 			break
 		}
 	}
 
-	if err := plugins.SufficientAddressing(d.conf.Addressing); err != nil {
+	if err := connector.SufficientAddressing(d.conf.Addressing); err != nil {
 		scopedLog.WithError(err).Fatal("Insufficient addressing")
 	}
 
-	d.routes = []api.StaticRoute{}
-	if d.conf.Addressing.IPV6 != nil {
-		if routes, err := plugins.IPv6Routes(d.conf.Addressing); err != nil {
-			scopedLog.WithError(err).Fatal("Unable to generate IPv6 routes")
-		} else {
-			for _, r := range routes {
-				d.routes = append(d.routes, newLibnetworkRoute(r))
-			}
-		}
+	d.updateRoutes(nil)
 
-		d.gatewayIPv6 = plugins.IPv6Gateway(d.conf.Addressing)
-	}
-
-	if d.conf.Addressing.IPV4 != nil {
-		if routes, err := plugins.IPv4Routes(d.conf.Addressing); err != nil {
-			scopedLog.WithError(err).Fatal("Unable to generate IPv4 routes")
-		} else {
-			for _, r := range routes {
-				d.routes = append(d.routes, newLibnetworkRoute(r))
-			}
-		}
-
-		d.gatewayIPv4 = plugins.IPv6Gateway(d.conf.Addressing)
-	}
-
-	scopedLog.Info("Cilium Docker plugin ready")
+	log.Infof("Cilium Docker plugin ready")
 
 	return d, nil
+}
+
+func (driver *driver) updateRoutes(addressing *models.NodeAddressing) {
+	driver.mutex.Lock()
+	defer driver.mutex.Unlock()
+
+	if addressing != nil {
+		driver.conf.Addressing = addressing
+	}
+
+	driver.routes = []api.StaticRoute{}
+
+	if driver.conf.Addressing.IPV6 != nil && driver.conf.Addressing.IPV6.Enabled {
+		if routes, err := connector.IPv6Routes(driver.conf.Addressing, int(driver.conf.RouteMTU)); err != nil {
+			log.Fatalf("Unable to generate IPv6 routes: %s", err)
+		} else {
+			for _, r := range routes {
+				driver.routes = append(driver.routes, newLibnetworkRoute(r))
+			}
+		}
+
+		driver.gatewayIPv6 = connector.IPv6Gateway(driver.conf.Addressing)
+	}
+
+	if driver.conf.Addressing.IPV4 != nil && driver.conf.Addressing.IPV4.Enabled {
+		if routes, err := connector.IPv4Routes(driver.conf.Addressing, int(driver.conf.RouteMTU)); err != nil {
+			log.Fatalf("Unable to generate IPv4 routes: %s", err)
+		} else {
+			for _, r := range routes {
+				driver.routes = append(driver.routes, newLibnetworkRoute(r))
+			}
+		}
+
+		driver.gatewayIPv4 = connector.IPv4Gateway(driver.conf.Addressing)
+	}
 }
 
 // Listen listens for docker requests on a particular set of endpoints on the given
@@ -254,83 +277,59 @@ type CreateEndpointRequest struct {
 
 func (driver *driver) createEndpoint(w http.ResponseWriter, r *http.Request) {
 	var create CreateEndpointRequest
+	var err error
 	if err := json.NewDecoder(r.Body).Decode(&create); err != nil {
 		sendError(w, "Unable to decode JSON payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	log.WithField(logfields.Request, logfields.Repr(&create)).Debug("Create endpoint request")
 
-	if create.Interface.Address == "" {
-		log.Warn("No IPv4 address provided in CreateEndpoint request")
-	}
-
-	if create.Interface.AddressIPv6 == "" {
-		sendError(w, "No IPv6 address provided (required)", http.StatusBadRequest)
-		return
-	}
-
-	//	maps := make([]endpoint.PortMap, 0, 32)
-	//
-	//	for key, val := range create.Options {
-	//		switch key {
-	//		case "com.docker.network.portmap":
-	//			var portmap []lnTypes.PortBinding
-	//			if err := json.Unmarshal(val, &portmap); err != nil {
-	//				sendError(w, "Unable to decode JSON payload: "+err.Error(), http.StatusBadRequest)
-	//				return
-	//			}
-	//			log.WithField(logfields.Object, logfields.Repr(portmap)).Debug("PortBinding:")
-	//
-	//			// FIXME: Host IP is ignored for now
-	//			for _, m := range portmap {
-	//				maps = append(maps, endpoint.PortMap{
-	//					From:  m.HostPort,
-	//					To:    m.Port,
-	//					Proto: uint8(m.Proto),
-	//				})
-	//			}
-	//
-	//		case "com.docker.network.endpoint.exposedports":
-	//			var tp []lnTypes.TransportPort
-	//			if err := json.Unmarshal(val, &tp); err != nil {
-	//				sendError(w, "Unable to decode JSON payload: "+err.Error(), http.StatusBadRequest)
-	//				return
-	//			}
-	//			log.WithField(logfields.Object, logfields.Repr(&tp)).Debug("ExposedPorts")
-	//			// TODO: handle exposed ports
-	//		}
-	//	}
-
-	_, err := driver.client.EndpointGet(endpointID(create.EndpointID))
-	if err != nil {
-		switch err.(type) {
-		case *endpoint.GetEndpointIDNotFound:
-			// Expected result
-		default:
-			sendError(w, fmt.Sprintf("Error retrieving endpoint %s", err), http.StatusBadRequest)
-			return
-		}
-	} else {
-		sendError(w, "Endpoint already exists", http.StatusBadRequest)
-		return
-	}
-
-	ip6, err := addressing.NewCiliumIPv6(create.Interface.AddressIPv6)
-	if err != nil {
-		sendError(w, fmt.Sprintf("Unable to parse IPv6 address: %s", err),
-			http.StatusBadRequest)
+	if create.Interface.Address == "" && create.Interface.AddressIPv6 == "" {
+		sendError(w, "No IPv4 or IPv6 address provided (required)", http.StatusBadRequest)
 		return
 	}
 
 	endpoint := &models.EndpointChangeRequest{
-		ID:               int64(ip6.EndpointID()),
-		State:            models.EndpointStateCreating,
-		DockerEndpointID: create.EndpointID,
-		DockerNetworkID:  create.NetworkID,
-		Addressing: &models.EndpointAddressing{
-			IPV6: ip6.String(),
+		SyncBuildEndpoint: true,
+		State:             models.EndpointStateWaitingForIdentity,
+		DockerEndpointID:  create.EndpointID,
+		DockerNetworkID:   create.NetworkID,
+		Addressing: &models.AddressPair{
+			IPV6: create.Interface.AddressIPv6,
 			IPV4: create.Interface.Address,
 		},
+	}
+
+	removeLinkOnErr := func(link netlink.Link) {
+		if err != nil && link != nil && !reflect.ValueOf(link).IsNil() {
+			if err := netlink.LinkDel(link); err != nil {
+				log.WithError(err).WithFields(logrus.Fields{
+					logfields.DatapathMode: driver.conf.DatapathMode,
+					logfields.Device:       link.Attrs().Name,
+				}).Warn("failed to clean up")
+			}
+		}
+	}
+
+	switch driver.conf.DatapathMode {
+	case option.DatapathModeVeth:
+		var veth *netlink.Veth
+		veth, _, _, err = connector.SetupVeth(create.EndpointID, int(driver.conf.DeviceMTU), endpoint)
+		defer removeLinkOnErr(veth)
+	case option.DatapathModeIpvlan:
+		var ipvlan *netlink.IPVlan
+		ipvlan, _, _, err = connector.CreateIpvlanSlave(
+			create.EndpointID, int(driver.conf.DeviceMTU),
+			int(driver.conf.IpvlanConfiguration.MasterDeviceIndex),
+			driver.conf.IpvlanConfiguration.OperationMode, endpoint,
+		)
+		defer removeLinkOnErr(ipvlan)
+	}
+	if err != nil {
+		sendError(w,
+			fmt.Sprintf("Error while setting up %s mode: %s", driver.conf.DatapathMode, err),
+			http.StatusBadRequest)
+		return
 	}
 
 	// FIXME: Translate port mappings to RuleL4 policy elements
@@ -348,6 +347,7 @@ func (driver *driver) createEndpoint(w http.ResponseWriter, r *http.Request) {
 		// There's no problem in the setup but docker inspect will show an empty mac address
 		MacAddress: "",
 	}
+
 	resp := &api.CreateEndpointResponse{
 		Interface: respIface,
 	}
@@ -357,13 +357,21 @@ func (driver *driver) createEndpoint(w http.ResponseWriter, r *http.Request) {
 
 func (driver *driver) deleteEndpoint(w http.ResponseWriter, r *http.Request) {
 	var del api.DeleteEndpointRequest
+	var ifName string
 	if err := json.NewDecoder(r.Body).Decode(&del); err != nil {
 		sendError(w, "Could not decode JSON encode payload", http.StatusBadRequest)
 		return
 	}
 	log.WithField(logfields.Request, logfields.Repr(&del)).Debug("Delete endpoint request")
 
-	if err := plugins.DelLinkByName(plugins.Endpoint2IfName(del.EndpointID)); err != nil {
+	switch driver.conf.DatapathMode {
+	case option.DatapathModeVeth:
+		ifName = connector.Endpoint2IfName(del.EndpointID)
+	case option.DatapathModeIpvlan:
+		ifName = connector.Endpoint2TempIfName(del.EndpointID)
+	}
+
+	if err := link.DeleteByName(ifName); err != nil {
 		log.WithError(err).Warn("Error while deleting link")
 	}
 
@@ -386,6 +394,10 @@ func (driver *driver) joinEndpoint(w http.ResponseWriter, r *http.Request) {
 		j   api.JoinRequest
 		err error
 	)
+
+	driver.mutex.RLock()
+	defer driver.mutex.RUnlock()
+
 	if err := json.NewDecoder(r.Body).Decode(&j); err != nil {
 		sendError(w, "Could not decode JSON encode payload", http.StatusBadRequest)
 		return
@@ -399,37 +411,10 @@ func (driver *driver) joinEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.WithField(logfields.Object, old).Debug("Existing endpoint")
-	if old.State != models.EndpointStateCreating {
-		sendError(w, "Error: endpoint not in creating state", http.StatusBadRequest)
-		return
-	}
-
-	ep := &models.EndpointChangeRequest{
-		State: models.EndpointStateWaitingForIdentity,
-	}
-
-	veth, _, tmpIfName, err := plugins.SetupVeth(j.EndpointID, 1450, ep)
-	if err != nil {
-		sendError(w, "Error while setting up veth pair: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	defer func() {
-		if err != nil {
-			if err = netlink.LinkDel(veth); err != nil {
-				log.WithError(err).WithField(logfields.Veth, veth.Name).Warn("failed to clean up veth")
-			}
-		}
-	}()
-
-	if err = driver.client.EndpointPatch(endpointPkg.NewCiliumID(old.ID), ep); err != nil {
-		log.WithError(err).Error("Joining endpoint failed")
-		sendError(w, "Unable to connect endpoint to network: "+err.Error(),
-			http.StatusInternalServerError)
-	}
 
 	res := &api.JoinResponse{
 		InterfaceName: &api.InterfaceName{
-			SrcName:   tmpIfName,
+			SrcName:   connector.Endpoint2TempIfName(j.EndpointID),
 			DstPrefix: ContainerInterfacePrefix,
 		},
 		StaticRoutes:          driver.routes,
@@ -444,7 +429,7 @@ func (driver *driver) joinEndpoint(w http.ResponseWriter, r *http.Request) {
 	// msg=\"failed to set gateway while updating gateway: file exists\" \n"
 	//
 	// If empty, it works as expected without docker runtime errors
-	// res.Gateway = plugins.IPv4Gateway(addr)
+	// res.Gateway = connector.IPv4Gateway(addr)
 
 	log.WithField(logfields.Response, logfields.Repr(res)).Debug("Join response")
 	objectResponse(w, res)

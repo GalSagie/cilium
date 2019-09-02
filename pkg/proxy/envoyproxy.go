@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2018 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,131 +16,71 @@ package proxy
 
 import (
 	"fmt"
-	"net/http"
-	"net/url"
 	"sync"
-	"time"
 
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/envoy"
-	"github.com/cilium/cilium/pkg/flowdebug"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/proxy/accesslog"
-
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
+	"github.com/cilium/cilium/pkg/revert"
 )
 
 // the global Envoy instance
 var envoyProxy *envoy.Envoy
 
-// EnvoyRedirect implements the Redirect interface for a l7 proxy
-type EnvoyRedirect struct {
-	id      string
-	toPort  uint16
-	ingress bool
-	source  ProxySource
-}
-
-// ToPort returns the redirect port of an EnvoyRedirect
-func (r *EnvoyRedirect) ToPort() uint16 {
-	return r.toPort
-}
-
-// IsIngress returns true if the redirect is for ingress, and false for egress.
-func (r *EnvoyRedirect) IsIngress() bool {
-	return r.ingress
-}
-
-func (r *EnvoyRedirect) getSource() ProxySource {
-	return r.source
+// envoyRedirect implements the RedirectImplementation interface for an l7 proxy.
+type envoyRedirect struct {
+	listenerName string
+	xdsServer    *envoy.XDSServer
 }
 
 var envoyOnce sync.Once
 
 // createEnvoyRedirect creates a redirect with corresponding proxy
 // configuration. This will launch a proxy instance.
-func createEnvoyRedirect(l4 *policy.L4Filter, id string, source ProxySource, to uint16, wg *completion.WaitGroup) (Redirect, error) {
+func createEnvoyRedirect(r *Redirect, stateDir string, xdsServer *envoy.XDSServer, mayUseOriginalSourceAddr bool, wg *completion.WaitGroup) (RedirectImplementation, error) {
 	envoyOnce.Do(func() {
 		// Start Envoy on first invocation
-		envoyProxy = envoy.StartEnvoy(9901, viper.GetString("state-dir"),
-			viper.GetString("state-dir"), 0)
+		envoyProxy = envoy.StartEnvoy(stateDir, option.Config.EnvoyLogPath, 0)
 	})
 
+	l := r.listener
 	if envoyProxy != nil {
-		redir := &EnvoyRedirect{
-			id:      id,
-			toPort:  to,
-			ingress: l4.Ingress,
-			source:  source,
+		redir := &envoyRedirect{
+			listenerName: fmt.Sprintf("%s:%d", l.name, l.proxyPort),
+			xdsServer:    xdsServer,
 		}
-
-		envoyProxy.AddListener(id, to, l4.L7RulesPerEp, l4.Ingress, redir, wg)
+		// Only use original source address for egress
+		if l.ingress {
+			mayUseOriginalSourceAddr = false
+		}
+		xdsServer.AddListener(redir.listenerName, l.parserType, l.proxyPort, l.ingress,
+			mayUseOriginalSourceAddr, wg)
 
 		return redir, nil
 	}
 
-	return nil, fmt.Errorf("%s: Envoy proxy process failed to start, can not add redirect ", id)
+	return nil, fmt.Errorf("%s: Envoy proxy process failed to start, cannot add redirect", l.name)
 }
 
-// UpdateRules replaces old l7 rules of a redirect with new ones.
-func (r *EnvoyRedirect) UpdateRules(l4 *policy.L4Filter, wg *completion.WaitGroup) error {
-	if envoyProxy != nil {
-		envoyProxy.UpdateListener(r.id, l4.L7RulesPerEp, wg)
-		return nil
-	}
-	return fmt.Errorf("%s: Envoy proxy process failed to start, can not update redirect ", r.id)
+// UpdateRules is a no-op for envoy, as redirect data is synchronized via the
+// xDS cache.
+func (k *envoyRedirect) UpdateRules(wg *completion.WaitGroup, l4 *policy.L4Filter) (revert.RevertFunc, error) {
+	return func() error { return nil }, nil
 }
 
 // Close the redirect.
-func (r *EnvoyRedirect) Close(wg *completion.WaitGroup) {
-	if envoyProxy != nil {
-		envoyProxy.RemoveListener(r.id, wg)
-	}
-}
-
-// Log does access logging for Envoy
-func (r *EnvoyRedirect) Log(pblog *envoy.HttpLogEntry) {
-	flowdebug.Log(log.WithFields(logrus.Fields{}),
-		fmt.Sprintf("%s: Access log message: %s", pblog.CiliumResourceName, pblog.String()))
-
-	headers := make(http.Header)
-	for _, header := range pblog.Headers {
-		headers.Add(header.Key, header.Value)
+func (r *envoyRedirect) Close(wg *completion.WaitGroup) (revert.FinalizeFunc, revert.RevertFunc) {
+	if envoyProxy == nil {
+		return nil, nil
 	}
 
-	URL := url.URL{
-		Scheme: pblog.Scheme,
-		Host:   pblog.Host,
-		Path:   pblog.Path,
+	revertFunc := r.xdsServer.RemoveListener(r.listenerName, wg)
+
+	return nil, func() error {
+		// Don't wait for an ACK for the reverted xDS updates.
+		// This is best-effort.
+		revertFunc(completion.NewCompletion(nil, nil))
+		return nil
 	}
-
-	var proto string
-	switch pblog.HttpProtocol {
-	case envoy.Protocol_HTTP10:
-		proto = "HTTP/1"
-	case envoy.Protocol_HTTP11:
-		proto = "HTTP/1.1"
-	case envoy.Protocol_HTTP2:
-		proto = "HTTP/2"
-	}
-
-	record := newHTTPLogRecord(r, pblog.Method, &URL, proto, headers)
-
-	record.fillInfo(r, pblog.SourceAddress, pblog.DestinationAddress, pblog.SourceSecurityId)
-
-	var flowType accesslog.FlowType
-	var verdict accesslog.FlowVerdict
-
-	switch pblog.EntryType {
-	case envoy.EntryType_Denied:
-		flowType, verdict = accesslog.TypeRequest, accesslog.VerdictDenied
-	case envoy.EntryType_Request:
-		flowType, verdict = accesslog.TypeRequest, accesslog.VerdictForwarded
-	case envoy.EntryType_Response:
-		flowType, verdict = accesslog.TypeResponse, accesslog.VerdictForwarded
-	}
-
-	record.Timestamp = time.Unix(int64(pblog.Timestamp/1000000000), int64(pblog.Timestamp%1000000000)).UTC().Format(time.RFC3339Nano)
-	record.logStamped(flowType, verdict, int(pblog.Status), pblog.CiliumRuleRef)
 }

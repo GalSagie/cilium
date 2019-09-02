@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2017 Authors of Cilium
+ *  Copyright (C) 2016-2019 Authors of Cilium
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -33,15 +33,13 @@ struct arp_eth {
 
 /* Check if packet is ARP request for IP */
 static inline int arp_check(struct ethhdr *eth, struct arphdr *arp,
-			    struct arp_eth *arp_eth, __be32 ip,
-			    union macaddr *mac)
+			    struct arp_eth *arp_eth, union macaddr *mac)
 {
 	union macaddr *dmac = (union macaddr *) &eth->h_dest;
 
 	return arp->ar_op  == bpf_htons(ARPOP_REQUEST) &&
 	       arp->ar_hrd == bpf_htons(ARPHRD_ETHER) &&
-	       (eth_is_bcast(dmac) || !eth_addrcmp(dmac, mac)) &&
-	       arp_eth->ar_tip == ip;
+	       (eth_is_bcast(dmac) || !eth_addrcmp(dmac, mac));
 }
 
 static inline int arp_prepare_response(struct __sk_buff *skb, struct ethhdr *eth,
@@ -64,7 +62,7 @@ static inline int arp_prepare_response(struct __sk_buff *skb, struct ethhdr *eth
 	return 0;
 }
 
-static inline int arp_respond(struct __sk_buff *skb, union macaddr *mac, __be32 ip)
+static inline int arp_respond(struct __sk_buff *skb, union macaddr *mac, int direction)
 {
 	void *data_end = (void *) (long) skb->data_end;
 	void *data = (void *) (long) skb->data;
@@ -78,20 +76,21 @@ static inline int arp_respond(struct __sk_buff *skb, union macaddr *mac, __be32 
 
 	arp_eth = data + ETH_HLEN + sizeof(*arp);
 
-	if (arp_check(eth, arp, arp_eth, ip, mac)) {
-		ret = arp_prepare_response(skb, eth, arp_eth, ip, mac);
+	if (arp_check(eth, arp, arp_eth, mac)) {
+		__be32 target_ip = arp_eth->ar_tip;
+		ret = arp_prepare_response(skb, eth, arp_eth, target_ip, mac);
 		if (unlikely(ret != 0))
 			goto error;
 
 		cilium_dbg_capture(skb, DBG_CAPTURE_DELIVERY, skb->ifindex);
-		return redirect(skb->ifindex, 0);
+		return redirect(skb->ifindex, direction);
 	}
 
 	/* Pass any unknown ARP requests to the Linux stack */
 	return TC_ACT_OK;
 
 error:
-	return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
+	return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_EGRESS);
 }
 
 #endif /* __LIB_ARP__ */

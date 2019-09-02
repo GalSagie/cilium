@@ -9,15 +9,16 @@ import (
 	"net/http"
 
 	"github.com/go-openapi/errors"
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 
 	strfmt "github.com/go-openapi/strfmt"
 )
 
 // NewPostIPAMIPParams creates a new PostIPAMIPParams object
-// with the default values initialized.
+// no default values defined in spec.
 func NewPostIPAMIPParams() PostIPAMIPParams {
-	var ()
+
 	return PostIPAMIPParams{}
 }
 
@@ -28,23 +29,37 @@ func NewPostIPAMIPParams() PostIPAMIPParams {
 type PostIPAMIPParams struct {
 
 	// HTTP Request Object
-	HTTPRequest *http.Request
+	HTTPRequest *http.Request `json:"-"`
 
 	/*IP address
 	  Required: true
 	  In: path
 	*/
 	IP string
+	/*
+	  In: query
+	*/
+	Owner *string
 }
 
 // BindRequest both binds and validates a request, it assumes that complex things implement a Validatable(strfmt.Registry) error interface
-// for simple values it will use straight method calls
+// for simple values it will use straight method calls.
+//
+// To ensure default values, the struct must have been initialized with NewPostIPAMIPParams() beforehand.
 func (o *PostIPAMIPParams) BindRequest(r *http.Request, route *middleware.MatchedRoute) error {
 	var res []error
+
 	o.HTTPRequest = r
+
+	qs := runtime.Values(r.URL.Query())
 
 	rIP, rhkIP, _ := route.Params.GetOK("ip")
 	if err := o.bindIP(rIP, rhkIP, route.Formats); err != nil {
+		res = append(res, err)
+	}
+
+	qOwner, qhkOwner, _ := qs.GetOK("owner")
+	if err := o.bindOwner(qOwner, qhkOwner, route.Formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -54,13 +69,35 @@ func (o *PostIPAMIPParams) BindRequest(r *http.Request, route *middleware.Matche
 	return nil
 }
 
+// bindIP binds and validates parameter IP from path.
 func (o *PostIPAMIPParams) bindIP(rawData []string, hasKey bool, formats strfmt.Registry) error {
 	var raw string
 	if len(rawData) > 0 {
 		raw = rawData[len(rawData)-1]
 	}
 
+	// Required: true
+	// Parameter is provided by construction from the route
+
 	o.IP = raw
+
+	return nil
+}
+
+// bindOwner binds and validates parameter Owner from query.
+func (o *PostIPAMIPParams) bindOwner(rawData []string, hasKey bool, formats strfmt.Registry) error {
+	var raw string
+	if len(rawData) > 0 {
+		raw = rawData[len(rawData)-1]
+	}
+
+	// Required: false
+	// AllowEmptyValue: false
+	if raw == "" { // empty values pass all other validations
+		return nil
+	}
+
+	o.Owner = &raw
 
 	return nil
 }

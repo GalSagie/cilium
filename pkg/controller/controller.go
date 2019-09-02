@@ -15,19 +15,43 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/go-openapi/strfmt"
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	success = "success"
+	failure = "failure"
+)
+
 // ControllerFunc is a function that the controller runs. This type is used for
 // DoFunc and StopFunc.
-type ControllerFunc func() error
+type ControllerFunc func(ctx context.Context) error
+
+// ExitReason is a returnable type from DoFunc that causes the
+// controller to exit. This reason is recorded in the controller's status. The
+// controller is not removed from any manager.
+// Construct one with NewExitReason("a reason")
+type ExitReason struct {
+	// This is constucted in this odd way because the type assertion in
+	// runController didn't work otherwise.
+	error
+}
+
+// NewExitReason returns a new ExitReason
+func NewExitReason(reason string) ExitReason {
+	return ExitReason{errors.New(reason)}
+}
 
 // ControllerParams contains all parameters of a controller
 type ControllerParams struct {
@@ -69,7 +93,7 @@ func undefinedDoFunc(name string) error {
 // NoopFunc is a no-op placeholder for DoFunc & StopFunc.
 // It is automatically used when StopFunc is undefined, and can be used as a
 // DoFunc stub when the controller should only run StopFunc.
-func NoopFunc() error {
+func NoopFunc(ctx context.Context) error {
 	return nil
 }
 
@@ -118,8 +142,15 @@ type Controller struct {
 	consecutiveErrors int
 	lastError         error
 	lastErrorStamp    time.Time
+	lastDuration      time.Duration
 	uuid              string
 	stop              chan struct{}
+	update            chan struct{}
+	ctxDoFunc         context.Context
+	cancelDoFunc      context.CancelFunc
+
+	// terminated is closed after the controller has been terminated
+	terminated chan struct{}
 }
 
 // GetSuccessCount returns the number of successful controller runs
@@ -157,51 +188,95 @@ func (c *Controller) GetLastErrorTimestamp() time.Time {
 func (c *Controller) runController() {
 	errorRetries := 1
 
-	// ensure the callbacks are valid
-	if c.params.DoFunc == nil {
-		c.params.DoFunc = func() error { return undefinedDoFunc(c.name) }
-	}
-	if c.params.StopFunc == nil {
-		c.params.StopFunc = NoopFunc
-	}
+	c.mutex.RLock()
+	params := c.params
+	c.mutex.RUnlock()
+	runFunc := true
+	interval := 10 * time.Minute
 
 	for {
-		var (
-			err      error
-			interval = c.params.RunInterval
-		)
+		var err error
+		if runFunc {
+			interval = params.RunInterval
 
-		err = c.params.DoFunc()
-		if err != nil {
-			c.getLogger().WithField(fieldConsecutiveErrors, errorRetries).
-				WithError(err).Debug("Controller run failed")
-			c.recordError(err)
+			start := time.Now()
+			err = params.DoFunc(c.ctxDoFunc)
+			duration := time.Since(start)
 
-			if !c.params.NoErrorRetry {
-				if c.params.ErrorRetryBaseDuration != time.Duration(0) {
-					interval = time.Duration(errorRetries) * c.params.ErrorRetryBaseDuration
-				} else {
-					interval = time.Duration(errorRetries) * time.Second
+			c.mutex.Lock()
+			c.lastDuration = duration
+			c.getLogger().Debug("Controller func execution time: ", c.lastDuration)
+
+			if err != nil {
+				switch err := err.(type) {
+				case ExitReason:
+					// This is actually not an error case, but it causes an exit
+					c.recordSuccess()
+					c.lastError = err // This will be shown in the controller status
+
+					// Don't exit the goroutine, since that only happens when the
+					// controller is explicitly stopped. Instead, just wait for
+					// the next update.
+					c.getLogger().Debug("Controller run succeeded; waiting for next controller update or stop")
+					runFunc = false
+					interval = 10 * time.Minute
+
+				default:
+					c.getLogger().WithField(fieldConsecutiveErrors, errorRetries).
+						WithError(err).Debug("Controller run failed")
+					c.recordError(err)
+
+					if !params.NoErrorRetry {
+						if params.ErrorRetryBaseDuration != time.Duration(0) {
+							interval = time.Duration(errorRetries) * params.ErrorRetryBaseDuration
+						} else {
+							interval = time.Duration(errorRetries) * time.Second
+						}
+
+						errorRetries++
+					}
 				}
+			} else {
+				c.recordSuccess()
 
-				errorRetries++
+				// reset error retries after successful attempt
+				errorRetries = 1
+
+				// If no run interval is specified, no further updates
+				// are required.
+				if interval == time.Duration(0) {
+					// Don't exit the goroutine, since that only happens when the
+					// controller is explicitly stopped. Instead, just wait for
+					// the next update.
+					c.getLogger().Debug("Controller run succeeded; waiting for next controller update or stop")
+					runFunc = false
+					interval = 10 * time.Minute
+				}
 			}
-		} else {
-			c.recordSuccess()
 
-			// reset error retries after successful attempt
-			errorRetries = 1
-
-			// If no run interval is specified, no further updates
-			// are required and we can shut down the controller
-			if c.params.RunInterval == time.Duration(0) {
-				goto shutdown
-			}
+			c.mutex.Unlock()
 		}
 
 		select {
 		case <-c.stop:
 			goto shutdown
+
+		case <-c.update:
+			// If we receive a signal on both channels c.stop and c.update,
+			// golang will pick either c.stop or c.update randomly.
+			// This select will make sure we don't execute the controller
+			// while we are shutting down.
+			select {
+			case <-c.stop:
+				goto shutdown
+			default:
+			}
+			// Pick up any changes to the parameters in case the controller has
+			// been updated.
+			c.mutex.RLock()
+			params = c.params
+			c.mutex.RUnlock()
+			runFunc = true
 
 		case <-time.After(interval):
 		}
@@ -211,15 +286,37 @@ func (c *Controller) runController() {
 shutdown:
 	c.getLogger().Debug("Shutting down controller")
 
-	if err := c.params.StopFunc(); err != nil {
+	if err := params.StopFunc(context.TODO()); err != nil {
+		c.mutex.Lock()
 		c.recordError(err)
+		c.mutex.Unlock()
 		c.getLogger().WithField(fieldConsecutiveErrors, errorRetries).
 			WithError(err).Warn("Error on Controller stop")
+	}
+
+	close(c.terminated)
+}
+
+// updateParamsLocked sets the specified controller's parameters.
+//
+// If the RunInterval exceeds ControllerMaxInterval, it will be capped.
+func (c *Controller) updateParamsLocked(params ControllerParams) {
+	c.params = params
+
+	maxInterval := time.Duration(option.Config.MaxControllerInterval) * time.Second
+	if maxInterval > 0 && params.RunInterval > maxInterval {
+		c.getLogger().Infof("Limiting interval to %s", maxInterval)
+		c.params.RunInterval = maxInterval
 	}
 }
 
 func (c *Controller) stopController() {
+	if c.cancelDoFunc != nil {
+		c.cancelDoFunc()
+	}
+
 	close(c.stop)
+	close(c.update)
 }
 
 // logger returns a logrus object with controllerName and UUID fields.
@@ -261,23 +358,24 @@ func (c *Controller) GetStatusModel() *models.ControllerStatus {
 }
 
 // recordError updates all statistic collection variables on error
-// It locks c.mutex
+// c.mutex must be held.
 func (c *Controller) recordError(err error) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
 	c.lastError = err
 	c.lastErrorStamp = time.Now()
 	c.failureCount++
 	c.consecutiveErrors++
+	metrics.ControllerRuns.WithLabelValues(failure).Inc()
+	metrics.ControllerRunsDuration.WithLabelValues(failure).Observe(c.lastDuration.Seconds())
 }
 
 // recordSuccess updates all statistic collection variables on success
-// It locks c.mutex
+// c.mutex must be held.
 func (c *Controller) recordSuccess() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
 	c.lastError = nil
 	c.lastSuccessStamp = time.Now()
 	c.successCount++
 	c.consecutiveErrors = 0
+
+	metrics.ControllerRuns.WithLabelValues(success).Inc()
+	metrics.ControllerRunsDuration.WithLabelValues(success).Observe(c.lastDuration.Seconds())
 }

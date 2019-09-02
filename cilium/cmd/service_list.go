@@ -21,16 +21,17 @@ import (
 	"text/tabwriter"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/common/types"
 	"github.com/cilium/cilium/pkg/command"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 
 	"github.com/spf13/cobra"
 )
 
 // serviceListCmd represents the service_list command
 var serviceListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List services",
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List services",
 	Run: func(cmd *cobra.Command, args []string) {
 		listServices(cmd, args)
 	},
@@ -46,6 +47,14 @@ func listServices(cmd *cobra.Command, args []string) {
 	if err != nil {
 		Fatalf("Cannot get services list: %s", err)
 	}
+
+	if command.OutputJSON() {
+		if err := command.PrintOutput(list); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
 	printServiceList(w, list)
 }
@@ -61,15 +70,20 @@ func printServiceList(w *tabwriter.Writer, list []*models.Service) {
 	svcs := []ServiceOutput{}
 
 	for _, svc := range list {
-		feA, err := types.NewL3n4AddrFromModel(svc.FrontendAddress)
+		if svc.Status == nil || svc.Status.Realized == nil {
+			fmt.Fprint(os.Stderr, "error parsing svc: empty state")
+			continue
+		}
+
+		feA, err := loadbalancer.NewL3n4AddrFromModel(svc.Status.Realized.FrontendAddress)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error parsing frontend %+v", svc.FrontendAddress)
+			fmt.Fprintf(os.Stderr, "error parsing frontend %+v", svc.Status.Realized.FrontendAddress)
 			continue
 		}
 
 		var backendAddresses []string
-		for i, be := range svc.BackendAddresses {
-			beA, err := types.NewL3n4AddrFromBackendModel(be)
+		for i, be := range svc.Status.Realized.BackendAddresses {
+			beA, err := loadbalancer.NewL3n4AddrFromBackendModel(be)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error parsing backend %+v", be)
 				continue
@@ -84,7 +98,7 @@ func printServiceList(w *tabwriter.Writer, list []*models.Service) {
 		}
 
 		SvcOutput := ServiceOutput{
-			ID:               svc.ID,
+			ID:               svc.Status.Realized.ID,
 			FrontendAddress:  feA.String(),
 			BackendAddresses: backendAddresses,
 		}
@@ -94,13 +108,6 @@ func printServiceList(w *tabwriter.Writer, list []*models.Service) {
 	sort.Slice(svcs, func(i, j int) bool {
 		return svcs[i].ID <= svcs[j].ID
 	})
-
-	if command.OutputJSON() {
-		if err := command.PrintOutput(svcs); err != nil {
-			os.Exit(1)
-		}
-		return
-	}
 
 	for _, service := range svcs {
 		var str string

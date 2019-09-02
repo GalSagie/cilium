@@ -2,15 +2,22 @@
 
 ## cilium identity get
 
-Retrieve the identity of the specified label
+Retrieve information about an identity
 
 ### Synopsis
 
-
-Retrieve the identity of the specified label
+Retrieve information about an identity
 
 ```
-cilium identity get
+cilium identity get [flags]
+```
+
+### Options
+
+```
+  -h, --help            help for get
+      --label strings   Label to lookup
+  -o, --output string   json| jsonpath='{}'
 ```
 
 ### Options inherited from parent commands
@@ -22,5 +29,6 @@ cilium identity get
 ```
 
 ### SEE ALSO
-* [cilium identity](cilium_identity.html)	 - Manage security identities
+
+* [cilium identity](../cilium_identity)	 - Manage security identities
 

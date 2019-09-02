@@ -2,10 +2,9 @@
 
 ## cilium monitor
 
-Monitoring
+Display BPF program events
 
 ### Synopsis
-
 
 The monitor displays notifications and events emitted by the BPF
 programs attached to endpoints and devices. This includes:
@@ -14,18 +13,21 @@ programs attached to endpoints and devices. This includes:
   * Debugging information
 
 ```
-cilium monitor
+cilium monitor [flags]
 ```
 
 ### Options
 
 ```
-      --from []uint16         Filter by source endpoint id
-      --hex                   Do not dissect, print payload in HEX
-      --related-to []uint16   Filter by either source or destination endpoint id
-      --to []uint16           Filter by destination endpoint id
-  -t, --type string           Filter by event types [capture debug drop trace]
-  -v, --verbose               Enable verbose output
+      --from []uint16           Filter by source endpoint id
+  -h, --help                    help for monitor
+      --hex                     Do not dissect, print payload in HEX
+  -j, --json                    Enable json output. Shadows -v flag
+      --monitor-socket string   Configure monitor socket path
+      --related-to []uint16     Filter by either source or destination endpoint id
+      --to []uint16             Filter by destination endpoint id
+  -t, --type []string           Filter by event types [agent capture debug drop l7 trace]
+  -v, --verbose                 Enable verbose output
 ```
 
 ### Options inherited from parent commands
@@ -37,5 +39,6 @@ cilium monitor
 ```
 
 ### SEE ALSO
-* [cilium](cilium.html)	 - CLI
+
+* [cilium](../cilium)	 - CLI
 

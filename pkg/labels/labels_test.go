@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package labels
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/cilium/cilium/pkg/comparator"
-
+	"github.com/cilium/cilium/pkg/checker"
 	. "gopkg.in/check.v1"
 )
 
@@ -34,6 +37,7 @@ type LabelsSuite struct{}
 var _ = Suite(&LabelsSuite{})
 
 var (
+	// Elements are sorted by the key
 	lblsArray = []string{`unspec:%=%ed`, `unspec://=/=`, `unspec:foo=bar`, `unspec:foo2==bar2`, `unspec:foo=====`, `unspec:foo\\==\=`, `unspec:key=`}
 	lbls      = Labels{
 		"foo":    NewLabel("foo", "bar", LabelSourceUnspec),
@@ -57,12 +61,17 @@ func (s *LabelsSuite) TestSortMap(c *C) {
 	lblsString := strings.Join(lblsArray, ";")
 	lblsString += ";"
 	sortedMap := lbls.SortedList()
-	c.Assert(sortedMap, comparator.DeepEquals, []byte(lblsString))
+	c.Assert(sortedMap, checker.DeepEquals, []byte(lblsString))
 }
 
-type lblTest struct {
-	label  string
-	result *Label
+func (s *LabelsSuite) TestLabelArraySorted(c *C) {
+	lblsString := strings.Join(lblsArray, ";")
+	lblsString += ";"
+	str := ""
+	for _, l := range lbls.LabelArray() {
+		str += fmt.Sprintf(`%s:%s=%s;`, l.Source, l.Key, l.Value)
+	}
+	c.Assert(str, checker.DeepEquals, lblsString)
 }
 
 func (s *LabelsSuite) TestMap2Labels(c *C) {
@@ -75,7 +84,7 @@ func (s *LabelsSuite) TestMap2Labels(c *C) {
 		`//=/`:     "",
 		`%`:        `%ed`,
 	}, LabelSourceUnspec)
-	c.Assert(m, comparator.DeepEquals, lbls)
+	c.Assert(m, checker.DeepEquals, lbls)
 }
 
 func (s *LabelsSuite) TestMergeLabels(c *C) {
@@ -91,14 +100,14 @@ func (s *LabelsSuite) TestMergeLabels(c *C) {
 		"key2": NewLabel("key2", "value3", "source4"),
 	}
 	to.MergeLabels(from)
-	from["key1"].Value = "changed"
-	c.Assert(to, comparator.DeepEquals, want)
+	from["key1"] = NewLabel("key1", "changed", "source4")
+	c.Assert(to, checker.DeepEquals, want)
 }
 
 func (s *LabelsSuite) TestParseLabel(c *C) {
 	tests := []struct {
 		str string
-		out *Label
+		out Label
 	}{
 		{"source1:key1=value1", NewLabel("key1", "value1", "source1")},
 		{"key1=value1", NewLabel("key1", "value1", LabelSourceUnspec)},
@@ -110,23 +119,62 @@ func (s *LabelsSuite) TestParseLabel(c *C) {
 		{"1foo", NewLabel("1foo", "", LabelSourceUnspec)},
 		{":2foo", NewLabel("2foo", "", LabelSourceUnspec)},
 		{":3foo=", NewLabel("3foo", "", LabelSourceUnspec)},
+		{"reserved:=key", NewLabel("key", "", LabelSourceReserved)},
 		{"4blah=:foo=", NewLabel("foo", "", "4blah=")},
 		{"5blah::foo=", NewLabel("::foo", "", "5blah")},
 		{"6foo==", NewLabel("6foo", "=", LabelSourceUnspec)},
 		{"7foo=bar", NewLabel("7foo", "bar", LabelSourceUnspec)},
 		{"k8s:foo=bar:", NewLabel("foo", "bar:", "k8s")},
+		{"reservedz=host", NewLabel("reservedz", "host", LabelSourceUnspec)},
+		{":", NewLabel("", "", LabelSourceUnspec)},
 		{LabelSourceReservedKeyPrefix + "host", NewLabel("host", "", LabelSourceReserved)},
 	}
 	for _, test := range tests {
 		lbl := ParseLabel(test.str)
-		c.Assert(lbl, comparator.DeepEquals, test.out)
+		c.Assert(lbl, checker.DeepEquals, test.out)
+	}
+}
+
+func BenchmarkParseLabel(b *testing.B) {
+	tests := []struct {
+		str string
+		out Label
+	}{
+		{"source1:key1=value1", NewLabel("key1", "value1", "source1")},
+		{"key1=value1", NewLabel("key1", "value1", LabelSourceUnspec)},
+		{"value1", NewLabel("value1", "", LabelSourceUnspec)},
+		{"source1:key1", NewLabel("key1", "", "source1")},
+		{"source1:key1==value1", NewLabel("key1", "=value1", "source1")},
+		{"source::key1=value1", NewLabel("::key1", "value1", "source")},
+		{"$key1=value1", NewLabel("key1", "value1", LabelSourceReserved)},
+		{"1foo", NewLabel("1foo", "", LabelSourceUnspec)},
+		{":2foo", NewLabel("2foo", "", LabelSourceUnspec)},
+		{":3foo=", NewLabel("3foo", "", LabelSourceUnspec)},
+		{"reserved:=key", NewLabel("key", "", LabelSourceReserved)},
+		{"4blah=:foo=", NewLabel("foo", "", "4blah=")},
+		{"5blah::foo=", NewLabel("::foo", "", "5blah")},
+		{"6foo==", NewLabel("6foo", "=", LabelSourceUnspec)},
+		{"7foo=bar", NewLabel("7foo", "bar", LabelSourceUnspec)},
+		{"k8s:foo=bar:", NewLabel("foo", "bar:", "k8s")},
+		{"reservedz=host", NewLabel("reservedz", "host", LabelSourceUnspec)},
+		{":", NewLabel("", "", LabelSourceUnspec)},
+		{LabelSourceReservedKeyPrefix + "host", NewLabel("host", "", LabelSourceReserved)},
+	}
+	count := 0
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, test := range tests {
+			if ParseLabel(test.str).Source == LabelSourceUnspec {
+				count++
+			}
+		}
 	}
 }
 
 func (s *LabelsSuite) TestParseSelectLabel(c *C) {
 	tests := []struct {
 		str string
-		out *Label
+		out Label
 	}{
 		{"source1:key1=value1", NewLabel("key1", "value1", "source1")},
 		{"key1=value1", NewLabel("key1", "value1", LabelSourceAny)},
@@ -147,7 +195,7 @@ func (s *LabelsSuite) TestParseSelectLabel(c *C) {
 	}
 	for _, test := range tests {
 		lbl := ParseSelectLabel(test.str)
-		c.Assert(lbl, comparator.DeepEquals, test.out)
+		c.Assert(lbl, checker.DeepEquals, test.out)
 	}
 }
 
@@ -185,12 +233,12 @@ func (s *LabelsSuite) TestLabelCompare(c *C) {
 	c1 := NewLabel("bar", "", "kubernetes")
 	d1 := NewLabel("", "", "")
 
-	c.Assert(a1.Equals(a2), Equals, true)
-	c.Assert(a2.Equals(a1), Equals, true)
-	c.Assert(a1.Equals(b1), Equals, false)
-	c.Assert(a1.Equals(c1), Equals, false)
-	c.Assert(a1.Equals(d1), Equals, false)
-	c.Assert(b1.Equals(c1), Equals, false)
+	c.Assert(a1.Equals(&a2), Equals, true)
+	c.Assert(a2.Equals(&a1), Equals, true)
+	c.Assert(a1.Equals(&b1), Equals, false)
+	c.Assert(a1.Equals(&c1), Equals, false)
+	c.Assert(a1.Equals(&d1), Equals, false)
+	c.Assert(b1.Equals(&c1), Equals, false)
 }
 
 func (s *LabelsSuite) TestLabelParseKey(c *C) {
@@ -218,6 +266,74 @@ func (s *LabelsSuite) TestLabelParseKey(c *C) {
 	}
 	for _, test := range tests {
 		lbl := GetExtendedKeyFrom(test.str)
-		c.Assert(lbl, comparator.DeepEquals, test.out)
+		c.Assert(lbl, checker.DeepEquals, test.out)
+	}
+}
+
+func (s *LabelsSuite) TestLabelsCompare(c *C) {
+	la11 := NewLabel("a", "1", "src1")
+	la12 := NewLabel("a", "1", "src2")
+	la22 := NewLabel("a", "2", "src2")
+	lb22 := NewLabel("b", "2", "src2")
+
+	lblsAll := Labels{la11.Key: la11, la12.Key: la12, la22.Key: la22, lb22.Key: lb22}
+	lblsFewer := Labels{la11.Key: la11, la12.Key: la12, la22.Key: la22}
+	lblsLa11 := Labels{la11.Key: la11}
+	lblsLa12 := Labels{la12.Key: la12}
+	lblsLa22 := Labels{la22.Key: la22}
+	lblsLb22 := Labels{lb22.Key: lb22}
+
+	c.Assert(lblsAll.Equals(lblsAll), Equals, true)
+	c.Assert(lblsAll.Equals(lblsFewer), Equals, false)
+	c.Assert(lblsFewer.Equals(lblsAll), Equals, false)
+	c.Assert(lblsLa11.Equals(lblsLa12), Equals, false)
+	c.Assert(lblsLa12.Equals(lblsLa11), Equals, false)
+	c.Assert(lblsLa12.Equals(lblsLa22), Equals, false)
+	c.Assert(lblsLa22.Equals(lblsLa12), Equals, false)
+	c.Assert(lblsLa22.Equals(lblsLb22), Equals, false)
+	c.Assert(lblsLb22.Equals(lblsLa22), Equals, false)
+}
+
+func TestLabels_GetFromSource(t *testing.T) {
+	type args struct {
+		source string
+	}
+	tests := []struct {
+		name string
+		l    Labels
+		args args
+		want Labels
+	}{
+		{
+			name: "should contain label with the given source",
+			l: Labels{
+				"foo":   NewLabel("foo", "bar", "my-source"),
+				"other": NewLabel("other", "bar", ""),
+			},
+			args: args{
+				source: "my-source",
+			},
+			want: Labels{
+				"foo": NewLabel("foo", "bar", "my-source"),
+			},
+		},
+		{
+			name: "should return an empty slice as there are not labels for the given source",
+			l: Labels{
+				"foo":   NewLabel("foo", "bar", "any"),
+				"other": NewLabel("other", "bar", ""),
+			},
+			args: args{
+				source: "my-source",
+			},
+			want: Labels{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.l.GetFromSource(tt.args.source); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Labels.GetFromSource() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

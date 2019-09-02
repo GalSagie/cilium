@@ -1,3 +1,9 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 .. _glossary:
 
 Glossary
@@ -37,7 +43,7 @@ with words you expected to see here.
      https://kubernetes.io/docs/admin/daemons/
 
    ConfigMap
-     https://kubernetes.io/docs/tasks/configure-pod-container/configmap/
+     https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
 
    CNI
      https://github.com/containernetworking/cni
@@ -61,11 +67,14 @@ with words you expected to see here.
    Pods
      https://kubernetes.io/docs/concepts/workloads/pods/pod/
 
+   Service
+     https://kubernetes.io/docs/concepts/services-networking/service/
+
    CustomResourceDefinition
      https://kubernetes.io/docs/concepts/api-extension/custom-resources/#customresourcedefinitions
 
-   ThirdPartyResource
-     https://kubernetes.io/docs/tasks/access-kubernetes-api/extend-api-third-party-resource/
-
    HeadlessServices
      https://kubernetes.io/docs/concepts/services-networking/service/#headless-services
+
+   Helm
+     https://helm.sh/

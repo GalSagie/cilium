@@ -10,15 +10,15 @@ certs_dir="${dir}/certs"
 mkdir -p "${certs_dir}"
 cd "${certs_dir}"
 
-master="cilium-k8s-master"
-worker="cilium-k8s-node-2"
+master="k8s1"
+worker="k8s2"
 
 if [ -n "${INSTALL}" ]; then
     log "Downloading cfssl utility..."
     cfssl_url="https://pkg.cfssl.org/R1.2/cfssl_linux-amd64"
     cfssljson_url="https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64"
-    wget -nv ${cfssl_url}
-    wget -nv ${cfssljson_url}
+    ${WGET} -nv ${cfssl_url}
+    ${WGET} -nv ${cfssljson_url}
     log "Downloading cfssl utility... Done!"
     chmod +x cfssl_linux-amd64
     sudo mv cfssl_linux-amd64 /usr/bin/cfssl

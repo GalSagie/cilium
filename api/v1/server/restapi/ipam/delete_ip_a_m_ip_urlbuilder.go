@@ -38,7 +38,7 @@ func (o *DeleteIPAMIPURL) SetBasePath(bp string) {
 
 // Build a url path and query string
 func (o *DeleteIPAMIPURL) Build() (*url.URL, error) {
-	var result url.URL
+	var _result url.URL
 
 	var _path = "/ipam/{ip}"
 
@@ -46,15 +46,16 @@ func (o *DeleteIPAMIPURL) Build() (*url.URL, error) {
 	if ip != "" {
 		_path = strings.Replace(_path, "{ip}", ip, -1)
 	} else {
-		return nil, errors.New("IP is required on DeleteIPAMIPURL")
+		return nil, errors.New("ip is required on DeleteIPAMIPURL")
 	}
+
 	_basePath := o._basePath
 	if _basePath == "" {
-		_basePath = "/v1beta"
+		_basePath = "/v1"
 	}
-	result.Path = golangswaggerpaths.Join(_basePath, _path)
+	_result.Path = golangswaggerpaths.Join(_basePath, _path)
 
-	return &result, nil
+	return &_result, nil
 }
 
 // Must is a helper function to panic when the url builder returns an error

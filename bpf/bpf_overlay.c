@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2017 Authors of Cilium
+ *  Copyright (C) 2016-2019 Authors of Cilium
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,6 +23,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <linux/if_packet.h>
+
 #include "lib/utils.h"
 #include "lib/common.h"
 #include "lib/maps.h"
@@ -31,39 +33,70 @@
 #include "lib/dbg.h"
 #include "lib/trace.h"
 #include "lib/l3.h"
-#include "lib/geneve.h"
 #include "lib/drop.h"
 #include "lib/policy.h"
+#include "lib/nodeport.h"
 
-static inline int handle_ipv6(struct __sk_buff *skb)
+#ifdef ENABLE_IPV6
+static inline int handle_ipv6(struct __sk_buff *skb, __u32 *identity)
 {
 	void *data_end, *data;
 	struct ipv6hdr *ip6;
 	struct bpf_tunnel_key key = {};
 	struct endpoint_info *ep;
-	int l4_off, l3_off = ETH_HLEN;
+	int l4_off, l3_off = ETH_HLEN, hdrlen;
+	bool decrypted;
 
+	/* verifier workaround (dereference of modified ctx ptr) */
+	if (!revalidate_data_first(skb, &data, &data_end, &ip6))
+		return DROP_INVALID;
+#ifdef ENABLE_NODEPORT
+	if (!bpf_skip_nodeport(skb)) {
+		int ret = nodeport_lb6(skb, *identity);
+		if (ret < 0)
+			return ret;
+	}
+#endif
 	if (!revalidate_data(skb, &data, &data_end, &ip6))
 		return DROP_INVALID;
 
-	if (unlikely(skb_get_tunnel_key(skb, &key, sizeof(key), 0) < 0))
-		return DROP_NO_TUNNEL_KEY;
+	decrypted = ((skb->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
+	if (decrypted) {
+		*identity = get_identity(skb);
+	} else {
+		if (unlikely(skb_get_tunnel_key(skb, &key, sizeof(key), 0) < 0))
+			return DROP_NO_TUNNEL_KEY;
+		*identity = key.tunnel_id;
+	}
 
 	cilium_dbg(skb, DBG_DECAP, key.tunnel_id, key.tunnel_label);
 
-#ifdef ENCAP_GENEVE
-	if (1) {
-		uint8_t buf[MAX_GENEVE_OPT_LEN] = {};
-		struct geneveopt_val geneveopt_val = {};
-		int ret;
+#ifdef ENABLE_IPSEC
+	if (!decrypted) {
+		/* IPSec is not currently enforce (feature coming soon)
+		 * so for now just handle normally
+		 */
+		if (ip6->nexthdr != IPPROTO_ESP) {
+			update_metrics(skb->len, METRIC_INGRESS, REASON_PLAINTEXT);
+			goto not_esp;
+		}
 
-		if (unlikely(skb_get_tunnel_opt(skb, buf, sizeof(buf)) < 0))
-			return DROP_NO_TUNNEL_OPT;
-
-		ret = parse_geneve_options(&geneveopt_val, buf);
-		if (IS_ERR(ret))
-			return ret;
+		/* Decrypt "key" is determined by SPI */
+		skb->mark = MARK_MAGIC_DECRYPT;
+		set_identity(skb, key.tunnel_id);
+		/* To IPSec stack on cilium_vxlan we are going to pass
+		 * this up the stack but eth_type_trans has already labeled
+		 * this as an OTHERHOST type packet. To avoid being dropped
+		 * by IP stack before IPSec can be processed mark as a HOST
+		 * packet.
+		 */
+		skb_change_type(skb, PACKET_HOST);
+		return TC_ACT_OK;
+	} else {
+		key.tunnel_id = get_identity(skb);
+		skb->mark = 0;
 	}
+not_esp:
 #endif
 
 	/* Lookup IPv6 address in list of local endpoints */
@@ -74,10 +107,12 @@ static inline int handle_ipv6(struct __sk_buff *skb)
 			goto to_host;
 
 		__u8 nexthdr = ip6->nexthdr;
-		l4_off = l3_off + ipv6_hdrlen(skb, l3_off, &nexthdr);
-		return ipv6_local_delivery(skb, l3_off, l4_off, key.tunnel_id, ip6, nexthdr, ep);
-	} else {
-		return DROP_NON_LOCAL;
+		hdrlen = ipv6_hdrlen(skb, l3_off, &nexthdr);
+		if (hdrlen < 0)
+			return hdrlen;
+
+		l4_off = l3_off + hdrlen;
+		return ipv6_local_delivery(skb, l3_off, l4_off, key.tunnel_id, ip6, nexthdr, ep, METRIC_INGRESS);
 	}
 
 to_host:
@@ -87,9 +122,7 @@ to_host:
 		union macaddr router_mac = NODE_MAC;
 		int ret;
 
-		cilium_dbg(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
-
-		ret = ipv6_l3(skb, ETH_HLEN, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr);
+		ret = ipv6_l3(skb, ETH_HLEN, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr, METRIC_INGRESS);
 		if (ret != TC_ACT_OK)
 			return ret;
 
@@ -101,23 +134,78 @@ to_host:
 #endif
 }
 
-#ifdef ENABLE_IPV4
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_FROM_LXC) int tail_handle_ipv6(struct __sk_buff *skb)
+{
+	__u32 src_identity = 0;
+	int ret = handle_ipv6(skb, &src_identity);
 
-static inline int handle_ipv4(struct __sk_buff *skb)
+	if (IS_ERR(ret))
+		return send_drop_notify_error(skb, src_identity, ret, TC_ACT_SHOT, METRIC_INGRESS);
+
+	return ret;
+}
+#endif /* ENABLE_IPV6 */
+
+#ifdef ENABLE_IPV4
+static inline int handle_ipv4(struct __sk_buff *skb, __u32 *identity)
 {
 	void *data_end, *data;
 	struct iphdr *ip4;
 	struct endpoint_info *ep;
 	struct bpf_tunnel_key key = {};
+	bool decrypted;
 	int l4_off;
 
+	/* verifier workaround (dereference of modified ctx ptr) */
+	if (!revalidate_data_first(skb, &data, &data_end, &ip4))
+		return DROP_INVALID;
+#ifdef ENABLE_NODEPORT
+	if (!bpf_skip_nodeport(skb)) {
+		int ret = nodeport_lb4(skb, *identity);
+		if (ret < 0)
+			return ret;
+	}
+#endif
 	if (!revalidate_data(skb, &data, &data_end, &ip4))
 		return DROP_INVALID;
 
-	if (unlikely(skb_get_tunnel_key(skb, &key, sizeof(key), 0) < 0))
-		return DROP_NO_TUNNEL_KEY;
+	decrypted = ((skb->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
+	/* If packets are decrypted the key has already been pushed into metadata. */
+	if (decrypted) {
+		*identity = get_identity(skb);
+	} else {
+		if (unlikely(skb_get_tunnel_key(skb, &key, sizeof(key), 0) < 0))
+			return DROP_NO_TUNNEL_KEY;
+		*identity = key.tunnel_id;
+	}
 
 	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
+#ifdef ENABLE_IPSEC
+	if (!decrypted) {
+		/* IPSec is not currently enforce (feature coming soon)
+		 * so for now just handle normally
+		 */
+		if (ip4->protocol != IPPROTO_ESP) {
+			update_metrics(skb->len, METRIC_INGRESS, REASON_PLAINTEXT);
+			goto not_esp;
+		}
+
+		skb->mark = MARK_MAGIC_DECRYPT;
+		set_identity(skb, key.tunnel_id);
+		/* To IPSec stack on cilium_vxlan we are going to pass
+		 * this up the stack but eth_type_trans has already labeled
+		 * this as an OTHERHOST type packet. To avoid being dropped
+		 * by IP stack before IPSec can be processed mark as a HOST
+		 * packet.
+		 */
+		skb_change_type(skb, PACKET_HOST);
+		return TC_ACT_OK;
+	} else {
+		key.tunnel_id = get_identity(skb);
+		skb->mark = 0;
+	}
+not_esp:
+#endif
 
 	/* Lookup IPv4 address in list of local endpoints */
 	if ((ep = lookup_ip4_endpoint(ip4)) != NULL) {
@@ -126,9 +214,7 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 		if (ep->flags & ENDPOINT_F_HOST)
 			goto to_host;
 
-		return ipv4_local_delivery(skb, ETH_HLEN, l4_off, key.tunnel_id, ip4, ep);
-	} else {
-		return DROP_NON_LOCAL;
+		return ipv4_local_delivery(skb, ETH_HLEN, l4_off, key.tunnel_id, ip4, ep, METRIC_INGRESS);
 	}
 
 to_host:
@@ -137,8 +223,6 @@ to_host:
 		union macaddr host_mac = HOST_IFINDEX_MAC;
 		union macaddr router_mac = NODE_MAC;
 		int ret;
-
-		cilium_dbg(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
 
 		ret = ipv4_l3(skb, ETH_HLEN, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr, ip4);
 		if (ret != TC_ACT_OK)
@@ -152,36 +236,66 @@ to_host:
 #endif
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4) int tail_handle_ipv4(struct __sk_buff *skb)
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_FROM_LXC) int tail_handle_ipv4(struct __sk_buff *skb)
 {
-	int ret = handle_ipv4(skb);
+	__u32 src_identity = 0;
+	int ret = handle_ipv4(skb, &src_identity);
 
 	if (IS_ERR(ret))
-		return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
+		return send_drop_notify_error(skb, src_identity, ret, TC_ACT_SHOT, METRIC_INGRESS);
 
 	return ret;
 }
-
-#endif
+#endif /* ENABLE_IPV4 */
 
 __section("from-overlay")
 int from_overlay(struct __sk_buff *skb)
 {
+	__u16 proto;
 	int ret;
 
 	bpf_clear_cb(skb);
+	bpf_clear_nodeport(skb);
 
-	send_trace_notify(skb, TRACE_FROM_OVERLAY, 0, 0, 0, skb->ingress_ifindex, 0);
+	if (!validate_ethertype(skb, &proto)) {
+		/* Pass unknown traffic to the stack */
+		ret = TC_ACT_OK;
+		goto out;
+	}
 
-	switch (skb->protocol) {
+#ifdef ENABLE_NODEPORT
+	ret = nodeport_nat_rev(skb, true);
+	if (IS_ERR(ret) &&
+	    ret != DROP_NAT_NO_MAPPING &&
+	    ret != DROP_NAT_UNSUPP_PROTO)
+		goto out;
+#endif
+
+#ifdef ENABLE_IPSEC
+	if ((skb->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT) {
+		send_trace_notify(skb, TRACE_FROM_OVERLAY, get_identity(skb), 0, 0,
+				  skb->ingress_ifindex,
+				  TRACE_REASON_ENCRYPTED, TRACE_PAYLOAD_LEN);
+	} else
+#endif
+	{
+		send_trace_notify(skb, TRACE_FROM_OVERLAY, 0, 0, 0,
+				  skb->ingress_ifindex, 0, TRACE_PAYLOAD_LEN);
+	}
+
+	switch (proto) {
 	case bpf_htons(ETH_P_IPV6):
-		/* This is considered the fast path, no tail call */
-		ret = handle_ipv6(skb);
+#ifdef ENABLE_IPV6
+		ep_tail_call(skb, CILIUM_CALL_IPV6_FROM_LXC);
+		ret = DROP_MISSED_TAIL_CALL;
+#else
+		ret = DROP_UNKNOWN_L3;
+#endif
 		break;
 
 	case bpf_htons(ETH_P_IP):
 #ifdef ENABLE_IPV4
-		ep_tail_call(skb, CILIUM_CALL_IPV4);
+		ep_tail_call(skb, CILIUM_CALL_IPV4_FROM_LXC);
 		ret = DROP_MISSED_TAIL_CALL;
 #else
 		ret = DROP_UNKNOWN_L3;
@@ -192,38 +306,27 @@ int from_overlay(struct __sk_buff *skb)
 		/* Pass unknown traffic to the stack */
 		ret = TC_ACT_OK;
 	}
-
+out:
 	if (IS_ERR(ret))
-		return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
-	else
-		return ret;
+		return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_INGRESS);
+	return ret;
 }
 
-struct bpf_elf_map __section_maps POLICY_MAP = {
-	.type		= BPF_MAP_TYPE_HASH,
-	.size_key	= sizeof(__u32),
-	.size_value	= sizeof(struct policy_entry),
-	.pinning	= PIN_GLOBAL_NS,
-	.max_elem	= 1024,
-};
-
-__section_tail(CILIUM_MAP_RES_POLICY, SECLABEL) int handle_policy(struct __sk_buff *skb)
+__section("to-overlay")
+int to_overlay(struct __sk_buff *skb)
 {
-	__u32 src_label = skb->cb[CB_SRC_LABEL];
-	int ifindex = skb->cb[CB_IFINDEX];
-
-	if (policy_can_access(&POLICY_MAP, skb, src_label, 0, 0, 0, NULL) != TC_ACT_OK) {
-		return send_drop_notify(skb, src_label, SECLABEL, 0,
-					ifindex, DROP_POLICY, TC_ACT_SHOT);
-	} else {
-		cilium_dbg_capture(skb, DBG_CAPTURE_DELIVERY, ifindex);
-
-		/* ifindex 0 indicates passing down to the stack */
-		if (ifindex == 0)
-			return TC_ACT_OK;
-		else
-			return redirect(ifindex, 0);
-	}
+	/* Cannot compile the section out entriely, test/bpf/verifier-test.sh
+	 * workaround.
+	 */
+	int ret = TC_ACT_OK;
+#ifdef ENABLE_NODEPORT
+	if ((skb->mark & MARK_MAGIC_SNAT_DONE) == MARK_MAGIC_SNAT_DONE)
+		return TC_ACT_OK;
+	ret = nodeport_nat_fwd(skb, true);
+	if (IS_ERR(ret))
+		return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_EGRESS);
+#endif
+	return ret;
 }
 
 BPF_LICENSE("GPL");

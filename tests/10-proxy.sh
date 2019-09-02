@@ -11,6 +11,9 @@ redirect_debug_logs ${LOGS_DIR}
 
 set -ex
 
+log "${TEST_NAME} has been deprecated and replaced by test/runtime/lb.go:Services Policies"
+exit 0
+
 function cleanup {
   monitor_stop
   cilium service delete --all 2> /dev/null || true
@@ -75,6 +78,12 @@ function proxy_init {
   wait_for_docker_ipv6_addr server2
   wait_for_docker_ipv6_addr client
 
+  log "waiting for all 4 endpoints to get an identity"
+  while [ `cilium endpoint list -o jsonpath='{range [*]}{.status.identity.id}{"\n"}{end}' | grep '^[0-9]' | grep -v '^5$' | wc -l` -ne 4 ] ; do
+    log "waiting..."
+    sleep 1
+  done
+
   monitor_start
   log "finished proxy_init"
 }
@@ -124,8 +133,7 @@ function policy_many_egress {
 	"toPorts": [{
 	    "ports": [{"port": "8000", "protocol": "tcp"},
 		      {"port": "80",   "protocol": "tcp"},
-		      {"port": "8080", "protocol": "tcp"},
-		      {"port": "8080", "protocol": "udp"}],
+		      {"port": "8080", "protocol": "tcp"}],
 	    "rules": {
                 "HTTP": [{
 		    "method": "GET",
@@ -174,9 +182,7 @@ function policy_many_ingress {
 	],
 	"toPorts": [{
 	    "ports": [{"port": "80", "protocol": "tcp"},
-		      {"port": "8080", "protool": "tcp"},
-		      {"port": "8080", "protocol": "udp"},
-		      {"port": "8000", "protocol": "udp"}],
+		      {"port": "8080", "protocol": "tcp"}],
 	    "rules": {
                 "HTTP": [{
 		    "method": "GET",
@@ -246,8 +252,7 @@ function policy_egress_and_ingress {
 	"toPorts": [{
 	    "ports": [{"port": "8000", "protocol": "tcp"},
 		      {"port": "80",   "protocol": "tcp"},
-		      {"port": "8080", "protocol": "tcp"},
-		      {"port": "8080", "protocol": "udp"}],
+		      {"port": "8080", "protocol": "tcp"}],
 	    "rules": {
                 "HTTP": [{
 		    "method": "GET",

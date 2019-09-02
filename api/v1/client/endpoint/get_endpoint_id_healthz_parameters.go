@@ -6,10 +6,9 @@ package endpoint
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"context"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
@@ -63,8 +62,8 @@ for the get endpoint ID healthz operation typically these are written to a http.
 type GetEndpointIDHealthzParams struct {
 
 	/*ID
-	  String describing an endpoint with the format `[prefix:]id`. If no prefix
-	is specified, a prefix of `cilium-local:` is assumed. Not all endpoints
+	  String describing an endpoint with the format ``[prefix:]id``. If no prefix
+	is specified, a prefix of ``cilium-local:`` is assumed. Not all endpoints
 	will be addressable by all endpoint ID prefixes with the exception of the
 	local Cilium UUID which is assigned to all endpoints.
 

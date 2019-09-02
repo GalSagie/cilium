@@ -19,11 +19,6 @@ import (
 	"strings"
 )
 
-// Len returns the total number of rules inside `L7Rules`.
-func (rules *L7Rules) Len() int {
-	return len(rules.HTTP) + len(rules.Kafka)
-}
-
 // Exists returns true if the HTTP rule already exists in the list of rules
 func (h *PortRuleHTTP) Exists(rules L7Rules) bool {
 	for _, existingRule := range rules.HTTP {
@@ -63,9 +58,50 @@ func (k *PortRuleKafka) Exists(rules L7Rules) bool {
 	return false
 }
 
+// Exists returns true if the DNS rule already exists in the list of rules
+func (d *PortRuleDNS) Exists(rules L7Rules) bool {
+	for _, existingRule := range rules.DNS {
+		if d.Equal(existingRule) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Equal returns true if both rules are equal
 func (k *PortRuleKafka) Equal(o PortRuleKafka) bool {
-	return k.APIVersion == o.APIVersion && k.APIKey == o.APIKey && k.Topic == o.Topic
+	return k.APIVersion == o.APIVersion && k.APIKey == o.APIKey &&
+		k.Topic == o.Topic && k.ClientID == o.ClientID && k.Role == o.Role
+}
+
+// Exists returns true if the L7 rule already exists in the list of rules
+func (h *PortRuleL7) Exists(rules L7Rules) bool {
+	for _, existingRule := range rules.L7 {
+		if h.Equal(existingRule) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Equal returns true if both rules are equal
+func (d *PortRuleDNS) Equal(o PortRuleDNS) bool {
+	return d != nil && d.MatchName == o.MatchName && d.MatchPattern == o.MatchPattern
+}
+
+// Equal returns true if both L7 rules are equal
+func (h *PortRuleL7) Equal(o PortRuleL7) bool {
+	if len(*h) != len(o) {
+		return false
+	}
+	for k, v := range *h {
+		if v2, ok := o[k]; !ok || v2 != v {
+			return false
+		}
+	}
+	return true
 }
 
 // Validate returns an error if the layer 4 protocol is not valid
@@ -77,15 +113,6 @@ func (l4 L4Proto) Validate() error {
 	}
 
 	return nil
-}
-
-// NumRules returns the total number of L7Rules configured in this PortRule
-func (r *PortRule) NumRules() int {
-	if r.Rules == nil {
-		return 0
-	}
-
-	return r.Rules.Len()
 }
 
 // ParseL4Proto parses a string as layer 4 protocol

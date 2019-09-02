@@ -6,16 +6,16 @@ List connection tracking entries
 
 ### Synopsis
 
-
 List connection tracking entries
 
 ```
-cilium bpf ct list
+cilium bpf ct list ( <endpoint identifier> | global ) [flags]
 ```
 
 ### Options
 
 ```
+  -h, --help            help for list
   -o, --output string   json| jsonpath='{}'
 ```
 
@@ -28,5 +28,6 @@ cilium bpf ct list
 ```
 
 ### SEE ALSO
-* [cilium bpf ct](cilium_bpf_ct.html)	 - Connection tracking tables
+
+* [cilium bpf ct](../cilium_bpf_ct)	 - Connection tracking tables
 

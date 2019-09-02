@@ -18,58 +18,67 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 
+	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
+	"github.com/cilium/cilium/test/helpers/constants"
 
-	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
 )
 
-var _ = Describe("RuntimeValidatedCLI", func() {
+var _ = Describe("RuntimeCLI", func() {
 
-	var logger *logrus.Entry
 	var vm *helpers.SSHMeta
 
-	var once sync.Once
+	BeforeAll(func() {
+		vm = helpers.InitRuntimeHelper(helpers.Runtime, logger)
+		ExpectCiliumReady(vm)
 
-	initialize := func() {
-		logger = log.WithFields(logrus.Fields{"testName": "RuntimeCLI"})
-		logger.Info("Starting")
-		vm = helpers.CreateNewRuntimeHelper(helpers.Runtime, logger)
 		areEndpointsReady := vm.WaitEndpointsReady()
 		Expect(areEndpointsReady).Should(BeTrue())
-	}
-
-	BeforeEach(func() {
-		once.Do(initialize)
 	})
 
-	AfterEach(func() {
-		if CurrentGinkgoTestDescription().Failed {
-			vm.ReportFailed("cilium endpoint list")
-		}
+	JustAfterEach(func() {
+		vm.ValidateNoErrorsInLogs(CurrentGinkgoTestDescription().Duration)
+	})
+
+	AfterFailed(func() {
+		vm.ReportFailed()
+	})
+
+	AfterAll(func() {
+		vm.CloseSSHClient()
 	})
 
 	Context("Identity CLI testing", func() {
-		It("Test labelsSHA256", func() {
-			fooID := "id.foo"
-			namesLabels := [][]string{{"foo", fooID}, {"bar", "id.bar"}, {"baz", "id.baz"}}
 
+		var (
+			fooID       = "id.foo"
+			namesLabels = [][]string{{"foo", fooID}, {"bar", "id.bar"}, {"baz", "id.baz"}}
+		)
+
+		BeforeAll(func() {
 			for _, set := range namesLabels {
-				res := vm.ContainerCreate(set[0], helpers.NetperfImage, helpers.CiliumDockerNetwork, fmt.Sprintf("-l %s", set[1]))
-				defer vm.ContainerRm(set[0])
-				res.ExpectSuccess("Unable to create container: %s", res.CombineOutput())
+				res := vm.ContainerCreate(set[0], constants.NetperfImage, helpers.CiliumDockerNetwork, fmt.Sprintf("-l %s", set[1]))
+				res.ExpectSuccess("Unable to create container")
 			}
+		})
+
+		AfterAll(func() {
+			for _, set := range namesLabels {
+				_ = vm.ContainerRm(set[0])
+			}
+		})
+
+		It("Test labelsSHA256", func() {
 			areEndpointsReady := vm.WaitEndpointsReady()
 			Expect(areEndpointsReady).Should(BeTrue(), "endpoints not ready")
 
 			epModel := vm.EndpointGet(fmt.Sprintf("-l container:%s", fooID))
 			Expect(epModel).ShouldNot(BeNil(), "no endpoint model returned")
-			identity := epModel.Identity.ID
+			identity := epModel.Status.Identity.ID
 
-			out, err := vm.ExecCilium(fmt.Sprintf("identity get %d", identity)).Filter("{.Payload.labelsSHA256}")
+			out, err := vm.ExecCilium(fmt.Sprintf("identity get %d -o json", identity)).Filter("{[0].labelsSHA256}")
 
 			Expect(err).Should(BeNil(), "error getting SHA from identity")
 			fooSha := "7c5b1431262baa7f060728b6252abf6a42d9b39f38328d896b37755b1c578477"
@@ -78,18 +87,13 @@ var _ = Describe("RuntimeValidatedCLI", func() {
 
 		It("test identity list", func() {
 			By("Testing 'cilium identity list' for an endpoint's identity")
-			fooID := "id.foo"
-			namesLabels := [][]string{{"foo", fooID}, {"bar", "id.bar"}, {"baz", "id.baz"}}
 
-			for _, set := range namesLabels {
-				res := vm.ContainerCreate(set[0], helpers.NetperfImage, helpers.CiliumDockerNetwork, fmt.Sprintf("-l %s", set[1]))
-				defer vm.ContainerRm(set[0])
-				res.ExpectSuccess("Unable to create container: %s", res.CombineOutput())
-			}
+			areEndpointsReady := vm.WaitEndpointsReady()
+			Expect(areEndpointsReady).Should(BeTrue(), "endpoints not ready")
 
 			epModel := vm.EndpointGet(fmt.Sprintf("-l container:%s", fooID))
 			Expect(epModel).ShouldNot(BeNil(), "no endpoint model returned")
-			identity := strconv.FormatInt(epModel.Identity.ID, 10)
+			identity := strconv.FormatInt(epModel.Status.Identity.ID, 10)
 
 			res := vm.ExecCilium(fmt.Sprintf("identity list container:%s", fooID))
 			res.ExpectSuccess(fmt.Sprintf("Unable to get identity list output for label container:%s", fooID))
@@ -100,17 +104,39 @@ var _ = Describe("RuntimeValidatedCLI", func() {
 			Expect(containsIdentity).To(BeTrue(), "identity %s from 'cilium endpoint get' for endpoint %s not in 'cilium identity list' output", identity, resSingleOut)
 
 			By("Testing 'cilium identity list' for reserved identities")
-			res = vm.Exec(`cilium identity list --reserved`)
+			res = vm.Exec(`cilium identity list`)
 			resSingleOut = res.SingleOut()
 
-			reservedIdentities := []string{"health 4", "cluster 3", "host 1", "world 2"}
+			reservedIdentities := []string{"health", "host", "world", "init"}
 
 			for _, id := range reservedIdentities {
-				By(fmt.Sprintf("checking that reserved identity '%s' is in 'cilium identity list --reserved' output", id))
+				By("checking that reserved identity '%s' is in 'cilium identity list' output", id)
 				containsReservedIdentity := strings.Contains(resSingleOut, id)
 				Expect(containsReservedIdentity).To(BeTrue(), "reserved identity '%s' not in 'cilium identity list' output", id)
 			}
 		})
+	})
+
+	Context("stdout stderr testing", func() {
+
+		It("root command help should print to stderr", func() {
+			res := vm.ExecCilium("help")
+			Expect(res.GetStdOut()).Should(BeEmpty())
+			Expect(res.GetStdErr()).Should(ContainSubstring("Use \"cilium [command] --help\" for more information about a command."))
+		})
+
+		It("subcommand help should print to stderr", func() {
+			res := vm.ExecCilium("help bpf")
+			Expect(res.GetStdOut()).Should(BeEmpty())
+			Expect(res.GetStdErr()).Should(ContainSubstring("Use \"cilium bpf [command] --help\" for more information about a command."))
+		})
+
+		It("failed subcommand should print help to stderr", func() {
+			res := vm.ExecCilium("endpoint confi 173")
+			Expect(res.GetStdOut()).Should(BeEmpty())
+			Expect(res.GetStdErr()).Should(ContainSubstring("Use \"cilium endpoint [command] --help\" for more information about a command."))
+		})
+
 	})
 
 })

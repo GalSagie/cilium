@@ -1,3 +1,9 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 .. _k8s_policy:
 
 **************
@@ -15,8 +21,12 @@ with Kubernetes:
   as beta.
 
 - The extended `CiliumNetworkPolicy` format which is available as a
-  `ThirdPartyResource` and `CustomResourceDefinition` which supports to specify
-  policies at Layers 3-7 for both ingress and egress.
+  `CustomResourceDefinition` which supports specification of policies
+  at Layers 3-7 for both ingress and egress.
+
+It is recommended to only use one of the above policy types at a time to
+minimize unintended effects arising from the interaction between the
+policies.
 
 .. _NetworkPolicy:
 .. _networkpolicy_state:
@@ -27,6 +37,16 @@ NetworkPolicy
 
 For more information, see the official `NetworkPolicy documentation
 <https://kubernetes.io/docs/concepts/services-networking/network-policies/>`_.
+
+Known missing features for Kubernetes Network Policy:
+
++------------------------------+----------------------------------------------+
+| Feature                      | Tracking Issue                               |
++==============================+==============================================+
+| Use of named ports           | https://github.com/cilium/cilium/issues/2942 |
++------------------------------+----------------------------------------------+
+| Ingress CIDR-based L4 policy | https://github.com/cilium/cilium/issues/1684 |
++------------------------------+----------------------------------------------+
 
 .. _CiliumNetworkPolicy:
 
@@ -52,6 +72,10 @@ The raw specification of the resource in Go looks like this:
 
                 // Specs is a list of desired Cilium specific rule specification.
                 Specs api.Rules `json:"specs,omitempty"`
+
+                // Status is the status of the Cilium policy rule
+                // +optional
+                Status CiliumNetworkPolicyStatus `json:"status"`
         }
 
 Metadata 
@@ -65,7 +89,10 @@ Spec
   Field which contains a :ref:`policy_rule`
 Specs
   Field which contains a list of :ref:`policy_rule`. This field is useful if
-  multiple rules must be removed or added atomatically.
+  multiple rules must be removed or added automatically.
+
+Status
+  Provides visibility into whether the policy has been successfully applied
 
 Examples
 ========

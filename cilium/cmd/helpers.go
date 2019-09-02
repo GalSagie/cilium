@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,10 +20,19 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
+	"text/tabwriter"
 
-	"github.com/cilium/cilium/pkg/endpoint"
-	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/color"
+	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
+	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/maps/policymap"
+	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy/trafficdirection"
+	"github.com/cilium/cilium/pkg/u8proto"
 
 	"github.com/spf13/cobra"
 )
@@ -50,8 +59,8 @@ func requireEndpointID(cmd *cobra.Command, args []string) {
 		Usagef(cmd, "Missing endpoint id argument")
 	}
 
-	if id := policy.ReservedIdentities[args[0]]; id == policy.IdentityUnknown {
-		_, _, err := endpoint.ValidateID(args[0])
+	if id := identity.GetReservedID(args[0]); id == identity.IdentityUnknown {
+		_, _, err := endpointid.Parse(args[0])
 
 		if err != nil {
 			Fatalf("Cannot parse endpoint id \"%s\": %s", args[0], err)
@@ -89,10 +98,30 @@ func requireServiceID(cmd *cobra.Command, args []string) {
 	}
 }
 
+// TablePrinter prints the map[string][]string, which is an usual representation
+// of dumped BPF map, using tabwriter.
+func TablePrinter(firstTitle, secondTitle string, data map[string][]string) {
+	w := tabwriter.NewWriter(os.Stdout, 5, 0, 3, ' ', 0)
+
+	fmt.Fprintf(w, "%s\t%s\t\n", firstTitle, secondTitle)
+
+	for key, value := range data {
+		for k, v := range value {
+			if k == 0 {
+				fmt.Fprintf(w, "%s\t%s\t\n", key, v)
+			} else {
+				fmt.Fprintf(w, "%s\t%s\t\n", "", v)
+			}
+		}
+	}
+
+	w.Flush()
+}
+
 // Search 'result' for strings with escaped JSON inside, and expand the JSON.
 func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 	reStringWithJSON := regexp.MustCompile(`"[^"\\{]*{.*[^\\]"`)
-	reJSON := regexp.MustCompile(`{.*}`)
+	reJSON := regexp.MustCompile(`{(.|\n)*}`)
 	for {
 		var (
 			loc    []int
@@ -111,7 +140,7 @@ func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 			if resBytes[idx] != ' ' {
 				break
 			}
-			indent = fmt.Sprintf("%s ", indent)
+			indent = fmt.Sprintf("\t%s\t", indent)
 		}
 
 		stringStart := loc[0]
@@ -124,17 +153,13 @@ func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 			return bytes.Buffer{}, fmt.Errorf("Failed to Unquote string: %s\n%s", err.Error(), string(quotedBytes))
 		}
 
-		// Find the JSON within the quoted string.
+		// Find the JSON within the unquoted string.
 		nestedStart := 0
 		nestedEnd := 0
-		if locs := reJSON.FindAllStringIndex(unquoted, -1); locs != nil {
-			// The last match is the longest one.
-			last := len(locs) - 1
-			nestedStart = locs[last][0]
-			nestedEnd = locs[last][1]
-		} else if reJSON.Match(quotedBytes) {
-			// The entire string is JSON
-			nestedEnd = len(unquoted)
+		// Find the left-most match
+		if loc = reJSON.FindStringIndex(unquoted); loc != nil {
+			nestedStart = loc[0]
+			nestedEnd = loc[1]
 		}
 
 		// Decode the nested JSON
@@ -143,7 +168,7 @@ func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 			m := make(map[string]interface{})
 			nested := bytes.NewBufferString(unquoted[nestedStart:nestedEnd])
 			if err := json.NewDecoder(nested).Decode(&m); err != nil {
-				return bytes.Buffer{}, fmt.Errorf("Failed to decode nested JSON: %s", err.Error())
+				return bytes.Buffer{}, fmt.Errorf("Failed to decode nested JSON: %s (\n%s\n)", err.Error(), unquoted[nestedStart:nestedEnd])
 			}
 			decodedBytes, err := json.MarshalIndent(m, indent, "  ")
 			if err != nil {
@@ -163,4 +188,181 @@ func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 	}
 
 	return result, nil
+}
+
+// PolicyUpdateArgs is the parsed representation of a
+// bpf policy {add,delete} command.
+type PolicyUpdateArgs struct {
+	// path is the basename of the BPF map for this policy update.
+	path string
+
+	// trafficDirection represents the traffic direction provided
+	// as an argument e.g. `ingress`
+	trafficDirection trafficdirection.TrafficDirection
+
+	// label represents the identity of the label provided as argument.
+	label uint32
+
+	// port represents the port associated with the command, if specified.
+	port uint16
+
+	// protocols represents the set of protocols associated with the
+	// command, if specified.
+	protocols []uint8
+}
+
+// parseTrafficString converts the provided string to its corresponding
+// TrafficDirection. If the string does not correspond to a valid TrafficDirection
+// type, returns Invalid and a corresponding error.
+func parseTrafficString(td string) (trafficdirection.TrafficDirection, error) {
+	lowered := strings.ToLower(td)
+
+	switch lowered {
+	case "ingress":
+		return trafficdirection.Ingress, nil
+	case "egress":
+		return trafficdirection.Egress, nil
+	default:
+		return trafficdirection.Invalid, fmt.Errorf("invalid direction %q provided", td)
+	}
+
+}
+
+// parsePolicyUpdateArgs parses the arguments to a bpf policy {add,delete}
+// command, provided as a list containing the endpoint ID, traffic direction,
+// identity and optionally, a list of ports.
+// Returns a parsed representation of the command arguments.
+func parsePolicyUpdateArgs(cmd *cobra.Command, args []string) *PolicyUpdateArgs {
+	if len(args) < 3 {
+		Usagef(cmd, "<endpoint id>, <traffic-direction>, and <identity> required")
+	}
+
+	pa, err := parsePolicyUpdateArgsHelper(args)
+	if err != nil {
+		Fatalf("%s", err)
+	}
+
+	return pa
+}
+
+func endpointToPolicyMapPath(endpointID string) (string, error) {
+	if endpointID == "" {
+		return "", fmt.Errorf("Need ID or label")
+	}
+
+	var mapName string
+	id, err := strconv.Atoi(endpointID)
+	if err == nil {
+		mapName = bpf.LocalMapName(policymap.MapName, uint16(id))
+	} else if numericIdentity := identity.GetReservedID(endpointID); numericIdentity != identity.IdentityUnknown {
+		mapSuffix := "reserved_" + strconv.FormatUint(uint64(numericIdentity), 10)
+		mapName = fmt.Sprintf("%s%s", policymap.MapName, mapSuffix)
+	} else {
+		return "", err
+	}
+
+	return bpf.MapPath(mapName), nil
+}
+
+func parsePolicyUpdateArgsHelper(args []string) (*PolicyUpdateArgs, error) {
+	trafficDirection := args[1]
+	parsedTd, err := parseTrafficString(trafficDirection)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to convert %s to a valid traffic direction: %s", args[1], err)
+	}
+
+	mapName, err := endpointToPolicyMapPath(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("Failed to parse endpointID %q", args[0])
+	}
+
+	peerLbl, err := strconv.ParseUint(args[2], 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to convert %s", args[2])
+	}
+	label := uint32(peerLbl)
+
+	port := uint16(0)
+	protos := []uint8{}
+	if len(args) > 3 {
+		pp, err := parseL4PortsSlice([]string{args[3]})
+		if err != nil {
+			return nil, fmt.Errorf("Failed to parse L4: %s", err)
+		}
+		port = pp[0].Port
+		if port != 0 {
+			proto, _ := u8proto.ParseProtocol(pp[0].Protocol)
+			if proto == 0 {
+				for _, proto := range u8proto.ProtoIDs {
+					protos = append(protos, uint8(proto))
+				}
+			} else {
+				protos = append(protos, uint8(proto))
+			}
+		}
+	}
+	if len(protos) == 0 {
+		protos = append(protos, 0)
+	}
+
+	pa := &PolicyUpdateArgs{
+		path:             mapName,
+		trafficDirection: parsedTd,
+		label:            label,
+		port:             port,
+		protocols:        protos,
+	}
+
+	return pa, nil
+}
+
+// updatePolicyKey updates an entry in the PolicyMap for the provided
+// PolicyUpdateArgs argument.
+// Adds the entry to the PolicyMap if add is true, otherwise the entry is
+// deleted.
+func updatePolicyKey(pa *PolicyUpdateArgs, add bool) {
+	// The map needs not to be transparently initialized here even if
+	// it's not present for some reason. Triggering map recreation with
+	// OpenOrCreate when some map attribute had changed would be much worse.
+	policyMap, err := policymap.Open(pa.path)
+	if err != nil {
+		Fatalf("Cannot open policymap %q : %s", pa.path, err)
+	}
+
+	for _, proto := range pa.protocols {
+		u8p := u8proto.U8proto(proto)
+		entry := fmt.Sprintf("%d %d/%s", pa.label, pa.port, u8p.String())
+		if add {
+			var proxyPort uint16
+			if err := policyMap.Allow(pa.label, pa.port, u8p, pa.trafficDirection, proxyPort); err != nil {
+				Fatalf("Cannot add policy key '%s': %s\n", entry, err)
+			}
+		} else {
+			if err := policyMap.Delete(pa.label, pa.port, u8p, pa.trafficDirection); err != nil {
+				Fatalf("Cannot delete policy key '%s': %s\n", entry, err)
+			}
+		}
+	}
+}
+
+// dumpConfig pretty prints boolean options
+func dumpConfig(Opts map[string]string) {
+	opts := []string{}
+	for k := range Opts {
+		opts = append(opts, k)
+	}
+	sort.Strings(opts)
+
+	for _, k := range opts {
+		// XXX: Reuse the format function from *option.Library
+		value = Opts[k]
+		if enabled, err := option.NormalizeBool(value); err != nil {
+			// If it cannot be parsed as a bool, just format the value.
+			fmt.Printf("%-24s %s\n", k, color.Green(value))
+		} else if enabled == option.OptionDisabled {
+			fmt.Printf("%-24s %s\n", k, color.Red("Disabled"))
+		} else {
+			fmt.Printf("%-24s %s\n", k, color.Green("Enabled"))
+		}
+	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2018 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package accesslog
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 )
@@ -68,15 +69,33 @@ const (
 	VersionIPV6
 )
 
-// EndpointInfo contains information about the endpoint sending/receiving the flow
+// EndpointInfo contains information about the sending (resp. receiving) endpoint.
+// If the field using this struct is SourceEndpoint, all fields correspond to
+// the sending endpoint, if the field using this struct is DestinationEndpoint,
+// then all fields correspond to the receiving endpoint.
 type EndpointInfo struct {
-	ID           uint64
-	IPv4         string
-	IPv6         string
-	Port         uint16
-	Identity     uint64
-	LabelsSHA256 string // hex-encoded SHA-256 signature of the labels, 64 characters in length
-	Labels       []string
+	// ID is the endpoint id
+	ID uint64
+
+	// IPv4 is the IPv4 address of the endpoint
+	IPv4 string
+
+	// IPv6 is the IPv6 address of the endpoint
+	IPv6 string
+
+	// Port represents the source point for SourceEndpoint and the
+	// destination port for DestinationEndpoint
+	Port uint16
+
+	// Identity is the security identity of the endpoint
+	Identity uint64
+
+	// Labels is the list of security relevant labels of the endpoint
+	Labels []string
+
+	// LabelsSHA256 is the hex encoded SHA-256 signature over the Labels
+	// slice, 64 characters in length
+	LabelsSHA256 string
 }
 
 // ServiceInfo contains information about the Kubernetes service
@@ -176,6 +195,12 @@ type LogRecord struct {
 
 	// Kafka contains information for Kafka request/responses
 	Kafka *LogRecordKafka `json:"Kafka,omitempty"`
+
+	// DNS contains information for DNS request/responses
+	DNS *LogRecordDNS `json:"DNS,omitempty"`
+
+	// L7 contains information about generic L7 protocols
+	L7 *LogRecordL7 `json:"L7,omitempty"`
 }
 
 // LogRecordHTTP contains the HTTP specific portion of a log record
@@ -221,4 +246,64 @@ type LogRecordKafka struct {
 	// Note that this string can be empty since not all messages use
 	// Topic. example: LeaveGroup, Heartbeat
 	Topic KafkaTopic
+}
+
+type DNSDataSource string
+
+const (
+	// DNSSourceAgentPoller indicates that the DNS record was created by a poll
+	// from cilium-agent.
+	DNSSourceAgentPoller DNSDataSource = "agent-poller"
+
+	// DNSSourceProxy indicates that the DNS record was created by a proxy
+	// intercepting a DNS request/response.
+	DNSSourceProxy DNSDataSource = "proxy"
+)
+
+// LogRecordDNS contains the DNS specific portion of a log record
+type LogRecordDNS struct {
+	// Query is the name in the original query
+	Query string `json:"Query,omitempty"`
+
+	// IPs are any IPs seen in this response.
+	// This field is filled only for DNS responses with IPs.
+	IPs []net.IP `json:"IPs,omitempty"`
+
+	// TTL is the lowest applicable TTL for this data
+	// This field is filled only for DNS responses.
+	TTL uint32 `json:"TTL,omitempty"`
+
+	// CNAMEs are any CNAME records seen in the response leading from Query
+	// to the IPs.
+	// This field is filled only for DNS responses with CNAMEs to IP data.
+	CNAMEs []string `json:"CNAMEs,omitempty"`
+
+	// ObservationSource represents the source of the data in this LogRecordDNS.
+	// Empty or undefined may indicate older cilium versions, as it is expected
+	// to be filled in.
+	ObservationSource DNSDataSource `json:"ObservationSource,omitempty"`
+
+	// RCode is the response code
+	// defined as per https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-6
+	// Use 	github.com/miekg/dns.RcodeToString map to retrieve string representation
+	RCode int `json:"RCode,omitempty"`
+
+	// QTypes are question types in DNS message
+	// https://www.ietf.org/rfc/rfc1035.txt
+	// Use github.com/miekg/dns.TypeToString map to retrieve string representation
+	QTypes []uint16 `json:"QTypes,omitempty"`
+
+	// AnswerTypes are record types in the answer section
+	// https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-4
+	// Use github.com/miekg/dns.TypeToString map to retrieve string representation
+	AnswerTypes []uint16 `json:"AnswerTypes,omitempty"`
+}
+
+// LogRecordL7 contains the generic L7 portion of a log record
+type LogRecordL7 struct {
+	// Proto is the name of the protocol this record represents
+	Proto string `json:"Proto,omitempty"`
+
+	// Fields is a map of key-value pairs describing the protocol
+	Fields map[string]string
 }

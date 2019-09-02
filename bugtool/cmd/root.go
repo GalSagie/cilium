@@ -18,34 +18,27 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/cilium/cilium/daemon/defaults"
+	"github.com/cilium/cilium/pkg/defaults"
 
 	"github.com/spf13/cobra"
 )
 
 // BugtoolRootCmd is the top level command for the bugtool.
 var BugtoolRootCmd = &cobra.Command{
-	Use:   "bugtool",
-	Short: "Cilium agent debugging tool",
-	Long:  "cilium-bugtool - capture system and node information for debugging a Cilium node",
-	Example: `	# Create archive with files
+	Use:   "cilium-bugtool [OPTIONS]",
+	Short: "Collects agent & system information useful for bug reporting",
+	Example: `	# Collect information and create archive file
 	$ cilium-bugtool
 	[...]
 
-	# Serving files over HTTP
-	$ cilium-bugtool --serve
-	[...]
-
-	# Retrieve archive from a Cilium Kubernetes pod
+	# Collect and retrieve archive if Cilium is running in a Kubernetes pod
 	$ kubectl get pods --namespace kube-system
 	NAME                          READY     STATUS    RESTARTS   AGE
 	cilium-kg8lv                  1/1       Running   0          13m
@@ -67,31 +60,33 @@ for sensitive information.
 )
 
 var (
-	archive      bool
-	k8s          bool
-	serve        bool
-	port         int
-	dumpPath     string
-	host         string
-	k8sNamespace string
-	k8sLabel     string
-	execTimeout  time.Duration
-	configPath   string
-	dryRunMode   bool
+	archive        bool
+	archiveType    string
+	k8s            bool
+	dumpPath       string
+	host           string
+	k8sNamespace   string
+	k8sLabel       string
+	execTimeout    time.Duration
+	configPath     string
+	dryRunMode     bool
+	enableMarkdown bool
+	archivePrefix  string
 )
 
 func init() {
 	BugtoolRootCmd.Flags().BoolVar(&archive, "archive", true, "Create archive when false skips deletion of the output directory")
-	BugtoolRootCmd.Flags().BoolVar(&serve, "serve", false, "Start HTTP server to serve static files")
+	BugtoolRootCmd.Flags().StringVarP(&archiveType, "archiveType", "o", "tar", "Archive type: tar | gz")
 	BugtoolRootCmd.Flags().BoolVar(&k8s, "k8s-mode", false, "Require Kubernetes pods to be found or fail")
 	BugtoolRootCmd.Flags().BoolVar(&dryRunMode, "dry-run", false, "Create configuration file of all commands that would have been executed")
-	BugtoolRootCmd.Flags().IntVarP(&port, "port", "p", 4444, "Port to use for the HTTP server, (default 4444)")
 	BugtoolRootCmd.Flags().StringVarP(&dumpPath, "tmp", "t", "/tmp", "Path to store extracted files")
 	BugtoolRootCmd.Flags().StringVarP(&host, "host", "H", "", "URI to server-side API")
 	BugtoolRootCmd.Flags().StringVarP(&k8sNamespace, "k8s-namespace", "", "kube-system", "Kubernetes namespace for Cilium pod")
 	BugtoolRootCmd.Flags().StringVarP(&k8sLabel, "k8s-label", "", "k8s-app=cilium", "Kubernetes label for Cilium pod")
 	BugtoolRootCmd.Flags().DurationVarP(&execTimeout, "exec-timeout", "", 30*time.Second, "The default timeout for any cmd execution in seconds")
 	BugtoolRootCmd.Flags().StringVarP(&configPath, "config", "", "./.cilium-bugtool.config", "Configuration to decide what should be run")
+	BugtoolRootCmd.Flags().BoolVar(&enableMarkdown, "enable-markdown", false, "Dump output of commands in markdown format")
+	BugtoolRootCmd.Flags().StringVarP(&archivePrefix, "archive-prefix", "", "", "String to prefix to name of archive if created (e.g., with cilium pod-name)")
 }
 
 func getVerifyCiliumPods() []string {
@@ -141,10 +136,31 @@ func removeIfEmpty(dir string) {
 	fmt.Printf("Deleted empty directory %s\n", dir)
 }
 
+func isValidArchiveType(archiveType string) bool {
+	switch archiveType {
+	case
+		"tar",
+		"gz":
+		return true
+	}
+	return false
+}
+
 func runTool() {
+	// Validate archive type
+	if !isValidArchiveType(archiveType) {
+		fmt.Fprintf(os.Stderr, "Error: unsupported output type: %s, must be one of tar|gz\n", archiveType)
+		os.Exit(1)
+	}
+
 	// Prevent collision with other directories
 	nowStr := time.Now().Format("20060102-150405.999-0700-MST")
-	prefix := fmt.Sprintf("cilium-bugtool-%s-", nowStr)
+	var prefix string
+	if archivePrefix != "" {
+		prefix = fmt.Sprintf("%s-cilium-bugtool-%s-", archivePrefix, nowStr)
+	} else {
+		prefix = fmt.Sprintf("cilium-bugtool-%s-", nowStr)
+	}
 	dbgDir, err := ioutil.TempDir(dumpPath, prefix)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create debug directory %s\n", err)
@@ -179,24 +195,25 @@ func runTool() {
 	removeIfEmpty(cmdDir)
 	removeIfEmpty(confDir)
 
-	// Please don't change the output below for the archive or directory.
-	// The order matters and is being used by scripts to copy the right
-	// file(s).
 	if archive {
-		archivePath, err := createArchive(dbgDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create archive %s\n", err)
-			os.Exit(1)
+		switch archiveType {
+		case "gz":
+			gzipPath, err := createGzip(dbgDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to create gzip %s\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("\nGZIP at %s\n", gzipPath)
+		case "tar":
+			archivePath, err := createArchive(dbgDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to create archive %s\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("\nARCHIVE at %s\n", archivePath)
 		}
-		fmt.Printf("\nARCHIVE at %s\n", archivePath)
 	} else {
 		fmt.Printf("\nDIRECTORY at %s\n", dbgDir)
-	}
-
-	if serve {
-		// Use signal handler to cleanup after serving
-		setupSigHandler(dbgDir)
-		serveStaticFiles(dbgDir)
 	}
 }
 
@@ -215,35 +232,22 @@ func printDisclaimer() {
 }
 
 func cleanup(dbgDir string) {
-	if !archive {
-		// Preserve directory when archive is not created
-		return
-	}
-	if err := os.RemoveAll(dbgDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to cleanup temporary files %s\n", err)
-	}
-}
+	if archive {
+		var files []string
 
-func setupSigHandler(dbgDir string) {
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt)
-	go func() {
-		for range signalChan {
-			printDisclaimer()
-			cleanup(dbgDir)
-			os.Exit(0)
+		switch archiveType {
+		case "gz":
+			files = append(files, dbgDir)
+			files = append(files, fmt.Sprintf("%s.tar", dbgDir))
+		case "tar":
+			files = append(files, dbgDir)
 		}
-	}()
-}
 
-func serveStaticFiles(debugDirectory string) {
-	fs := http.FileServer(http.Dir(debugDirectory))
-	addr := fmt.Sprintf(":%d", port)
-
-	http.Handle("/", fs)
-	fmt.Printf("Serving files at http://localhost%s\n", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "Could not start server %s\n", err)
+		for _, file := range files {
+			if err := os.RemoveAll(file); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to cleanup temporary files %s\n", err)
+			}
+		}
 	}
 }
 
@@ -284,7 +288,7 @@ func runAll(commands []string, cmdDir string, k8sPods []string) {
 			// iptables commands hold locks so we can't have multiple runs. They
 			// have to be run one at a time to avoid 'Another app is currently
 			// holding the xtables lock...'
-			writeCmdToFile(cmdDir, cmd, k8sPods)
+			writeCmdToFile(cmdDir, cmd, k8sPods, enableMarkdown)
 			continue
 		}
 		// Tell the wait group it needs to track another goroutine
@@ -303,18 +307,17 @@ func runAll(commands []string, cmdDir string, k8sPods []string) {
 			// When we are done we return the thing we took from
 			// the semaphore, so another goroutine can get it
 			defer func() { semaphore <- true }()
-			writeCmdToFile(cmdDir, cmd, k8sPods)
+			writeCmdToFile(cmdDir, cmd, k8sPods, enableMarkdown)
 		}(cmd)
 	}
 	// Wait for all the spawned goroutines to finish up.
 	wg.Wait()
 }
 
-func execCommand(cmd string, args ...string) (string, error) {
-	fmt.Printf("exec: %s %s\n", cmd, args)
+func execCommand(prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, cmd, args...).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "bash", "-c", prompt).CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("exec timeout")
 	}
@@ -322,7 +325,7 @@ func execCommand(cmd string, args ...string) (string, error) {
 }
 
 // writeCmdToFile will execute command and write markdown output to a file
-func writeCmdToFile(cmdDir, prompt string, k8sPods []string) {
+func writeCmdToFile(cmdDir, prompt string, k8sPods []string, enableMarkdown bool) {
 	// Clean up the filename
 	name := strings.Replace(prompt, "/", " ", -1)
 	name = strings.Replace(name, " ", "-", -1)
@@ -354,17 +357,17 @@ func writeCmdToFile(cmdDir, prompt string, k8sPods []string) {
 		}
 	}
 	// Write prompt as header and the output as body, and / or error but delete empty output.
-	output, err := execCommand(cmd, args...)
+	output, err := execCommand(prompt)
 	if err != nil {
 		fmt.Fprintf(f, fmt.Sprintf("> Error while running '%s':  %s\n\n", prompt, err))
 	}
 	// We deliberately continue in case there was a error but the output
 	// produced might have useful information
-	if strings.Contains(output, "```") {
+	if strings.Contains(output, "```") || !enableMarkdown {
 		// Already contains Markdown, print as is.
 		fmt.Fprint(f, output)
-	} else if len(output) > 0 {
-		fmt.Fprintf(f, fmt.Sprintf("# %s\n\n```\n%s\n```\n", prompt, output))
+	} else if enableMarkdown && len(output) > 0 {
+		fmt.Fprint(f, fmt.Sprintf("# %s\n\n```\n%s\n```\n", prompt, output))
 	} else {
 		// Empty file
 		os.Remove(f.Name())
@@ -387,7 +390,7 @@ func split(prompt string) (string, []string) {
 }
 
 func getCiliumPods(namespace, label string) ([]string, error) {
-	output, err := execCommand("kubectl", "-n", namespace, "get", "pods", "-l", label)
+	output, err := execCommand(fmt.Sprintf("kubectl -n %s get pods -l %s", namespace, label))
 	if err != nil {
 		return nil, err
 	}

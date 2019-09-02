@@ -8,21 +8,28 @@ include ../Makefile.defs
 
 
 TARGET=cilium-agent
-SOURCES := $(shell find ../api ../common ../daemon ../pkg ../monitor . \( -name '*.go'  ! -name '*_test.go' \))
+LINKS=cilium-node-monitor
+SOURCES := $(shell find ../api ../common ../daemon ../pkg . \( -name '*.go'  ! -name '*_test.go' \))
 $(TARGET): $(SOURCES) check-bindata
-	$(GO) build -i $(GOBUILD) -o $(TARGET)
+	@$(ECHO_GO)
+	$(QUIET)$(GO) build $(GOBUILD) -o $(TARGET)
 
-GO_BINDATA := go-bindata -prefix ../ -mode 0640 -modtime 1450269211 \
+GO_BINDATA := $(QUIET) go-bindata -prefix ../ -mode 0640 -modtime 1450269211 \
 	-ignore Makefile -ignore bpf_features.h -ignore lxc_config.h \
 	-ignore netdev_config.h -ignore node_config.h -ignore filter_config.h \
 	-ignore '.+\.o$$' -ignore '.+\.orig$$' -ignore '.+~$$' \
 	-ignore '\.DS_Store'
 
-all: $(TARGET)
+all: $(TARGET) links
+
+links:
+	$(foreach link,$(LINKS), ln -f -s $(TARGET) $(link) || cp $(TARGET) $(link);)
 
 clean:
-	rm -f $(TARGET)
-	$(GO) clean
+	@$(ECHO_CLEAN)
+	$(QUIET)rm -f $(TARGET)
+	$(QUIET)$(GO) clean
+	$(foreach link,$(LINKS), rm -f $(link);)
 
 ifeq ("$(PKG_BUILD)","")
 
@@ -30,21 +37,26 @@ install:
 	groupadd -f cilium
 	$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -m 0755 $(TARGET) $(DESTDIR)$(BINDIR)
+	$(foreach link,$(LINKS), ln -f -s $(TARGET) $(DESTDIR)$(BINDIR)/$(link) || cp $(TARGET) $(DESTDIR)$(BINDIR)/$(link);)
 
 else
 
 install:
 	$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -m 0755 $(TARGET) $(DESTDIR)$(BINDIR)
+	$(foreach link,$(LINKS), ln -f -s $(TARGET) $(DESTDIR)$(BINDIR)/$(link) || cp $(TARGET) $(DESTDIR)$(BINDIR)/$(link);)
 
 endif
 
 .PHONY: check-bindata
 check-bindata: bindata.go
-	../contrib/scripts/bindata.sh $(GO_BINDATA_SHA1SUM)
+	@echo "  CHECK contrib/scripts/bindata.sh"
+	$(QUIET) ../contrib/scripts/bindata.sh $(GO_BINDATA_SHA1SUM)
 
 apply-bindata: go-bindata
-	../contrib/scripts/bindata.sh apply
+	@$(ECHO_GEN)bpf.sha
+	$(QUIET) ../contrib/scripts/bindata.sh apply
 
 bindata.go go-bindata: $(BPF_FILES)
+	@$(ECHO_GEN) $@
 	$(GO_BINDATA) -o ./bindata.go $(BPF_FILES)

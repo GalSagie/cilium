@@ -19,7 +19,26 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 )
+
+// ProxyKeepAlivePeriod is the time used for sending periodic keepalives on
+// proxy connections. Cross-reference with datapath PROXY_DEFAULT_LIFETIME.
+const ProxyKeepAlivePeriod = time.Duration(5) * time.Minute
+
+func setKeepAlive(c net.Conn) error {
+	if tcp, ok := c.(*net.TCPConn); ok {
+		if err := tcp.SetKeepAlive(true); err != nil {
+			return fmt.Errorf("unable to enable keepalive: %s", err)
+		}
+
+		if err := tcp.SetKeepAlivePeriod(ProxyKeepAlivePeriod); err != nil {
+			return fmt.Errorf("unable to set keepalive period: %s", err)
+		}
+	}
+
+	return nil
+}
 
 func ciliumDialer(identity int, network, address string) (net.Conn, error) {
 	addr, err := net.ResolveTCPAddr(network, address)
@@ -63,6 +82,11 @@ func ciliumDialer(identity int, network, address string) (net.Conn, error) {
 	if err := syscall.Connect(fd, sockAddr); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("unable to connect: %s", err)
+	}
+
+	if err := setKeepAlive(c); err != nil {
+		c.Close()
+		return nil, err
 	}
 
 	return c, nil

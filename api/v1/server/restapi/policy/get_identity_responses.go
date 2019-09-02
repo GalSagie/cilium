@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // GetIdentityOKCode is the HTTP code returned for type GetIdentityOK
@@ -30,6 +30,7 @@ type GetIdentityOK struct {
 
 // NewGetIdentityOK creates GetIdentityOK with default headers values
 func NewGetIdentityOK() *GetIdentityOK {
+
 	return &GetIdentityOK{}
 }
 
@@ -50,13 +51,13 @@ func (o *GetIdentityOK) WriteResponse(rw http.ResponseWriter, producer runtime.P
 	rw.WriteHeader(200)
 	payload := o.Payload
 	if payload == nil {
+		// return empty array
 		payload = make([]*models.Identity, 0, 50)
 	}
 
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // GetIdentityNotFoundCode is the HTTP code returned for type GetIdentityNotFound
@@ -71,11 +72,14 @@ type GetIdentityNotFound struct {
 
 // NewGetIdentityNotFound creates GetIdentityNotFound with default headers values
 func NewGetIdentityNotFound() *GetIdentityNotFound {
+
 	return &GetIdentityNotFound{}
 }
 
 // WriteResponse to the client
 func (o *GetIdentityNotFound) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(404)
 }
@@ -97,6 +101,7 @@ type GetIdentityUnreachable struct {
 
 // NewGetIdentityUnreachable creates GetIdentityUnreachable with default headers values
 func NewGetIdentityUnreachable() *GetIdentityUnreachable {
+
 	return &GetIdentityUnreachable{}
 }
 
@@ -119,7 +124,6 @@ func (o *GetIdentityUnreachable) WriteResponse(rw http.ResponseWriter, producer 
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // GetIdentityInvalidStorageFormatCode is the HTTP code returned for type GetIdentityInvalidStorageFormat
@@ -139,6 +143,7 @@ type GetIdentityInvalidStorageFormat struct {
 
 // NewGetIdentityInvalidStorageFormat creates GetIdentityInvalidStorageFormat with default headers values
 func NewGetIdentityInvalidStorageFormat() *GetIdentityInvalidStorageFormat {
+
 	return &GetIdentityInvalidStorageFormat{}
 }
 
@@ -161,5 +166,4 @@ func (o *GetIdentityInvalidStorageFormat) WriteResponse(rw http.ResponseWriter, 
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }

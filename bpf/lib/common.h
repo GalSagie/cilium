@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2017 Authors of Cilium
+ *  Copyright (C) 2016-2019 Authors of Cilium
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -26,32 +26,62 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#ifndef HAVE_LRU_MAP_TYPE
+// FIXME: GH-3239 LRU logic is not handling timeouts gracefully enough
+// #ifndef HAVE_LRU_MAP_TYPE
+// #define NEEDS_TIMEOUT 1
+// #endif
 #define NEEDS_TIMEOUT 1
+
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+
+#ifndef AF_INET6
+#define AF_INET6 10
 #endif
 
 #ifndef EVENT_SOURCE
 #define EVENT_SOURCE 0
 #endif
 
-#define POLICY_MAP_SIZE	65536
-#define RESERVED_POLICY_SIZE 128
+#define PORT_UDP_VXLAN 4789
+#define PORT_UDP_GENEVE 6081
+#define PORT_UDP_VXLAN_LINUX 8472
+
+#ifdef PREALLOCATE_MAPS
+#define CONDITIONAL_PREALLOC 0
+#else
+#define CONDITIONAL_PREALLOC BPF_F_NO_PREALLOC
+#endif
 
 #define __inline__ __attribute__((always_inline))
+#ifndef __always_inline
+#define __always_inline inline __inline__
+#endif
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
+/* These are shared with test/bpf/check-complexity.sh, when modifying any of
+ * the below, that script should also be updated. */
 #define CILIUM_CALL_DROP_NOTIFY			1
 #define CILIUM_CALL_ERROR_NOTIFY		2
 #define CILIUM_CALL_SEND_ICMP6_ECHO_REPLY	3
 #define CILIUM_CALL_HANDLE_ICMP6_NS		4
 #define CILIUM_CALL_SEND_ICMP6_TIME_EXCEEDED	5
 #define CILIUM_CALL_ARP				6
-#define CILIUM_CALL_IPV4			7
+#define CILIUM_CALL_IPV4_FROM_LXC		7
 #define CILIUM_CALL_NAT64			8
 #define CILIUM_CALL_NAT46			9
-#define CILIUM_CALL_IPV6			10
-#define CILIUM_CALL_SIZE			11
+#define CILIUM_CALL_IPV6_FROM_LXC		10
+#define CILIUM_CALL_IPV4_TO_LXC_POLICY_ONLY	11
+#define CILIUM_CALL_IPV6_TO_LXC_POLICY_ONLY	12
+#define CILIUM_CALL_IPV4_TO_ENDPOINT		13
+#define CILIUM_CALL_IPV6_TO_ENDPOINT		14
+#define CILIUM_CALL_IPV4_NODEPORT_NAT		15
+#define CILIUM_CALL_IPV6_NODEPORT_NAT		16
+#define CILIUM_CALL_IPV4_NODEPORT_REVNAT	17
+#define CILIUM_CALL_IPV6_NODEPORT_REVNAT	18
+#define CILIUM_CALL_SIZE			19
 
 typedef __u64 mac_t;
 
@@ -62,83 +92,79 @@ union v6addr {
                 __u32 p3;
                 __u32 p4;
         };
+	struct {
+		__u64 d1;
+		__u64 d2;
+	};
         __u8 addr[16];
-};
+} __attribute__((packed));
 
-static inline bool __revalidate_data(struct __sk_buff *skb, void **data_,
-				     void **data_end_, void **l3,
-				     size_t l3_len)
+static inline bool validate_ethertype(struct __sk_buff *skb, __u16 *proto)
 {
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
 
-	if (data + ETH_HLEN + l3_len > data_end)
+	if (data + ETH_HLEN > data_end)
 		return false;
 
+	struct ethhdr *eth = data;
+	*proto = eth->h_proto;
+
+	if (bpf_ntohs(*proto) < ETH_P_802_3_MIN)
+		return false; // non-Ethernet II unsupported
+
+	return true;
+}
+
+static inline bool __revalidate_data(struct __sk_buff *skb, void **data_,
+				     void **data_end_, void **l3,
+				     const size_t l3_len, const bool pull)
+{
+	const size_t tot_len = ETH_HLEN + l3_len;
+	void *data_end;
+	void *data;
+
+	/* Verifier workaround, do this unconditionally: invalid size of register spill. */
+	if (pull)
+		skb_pull_data(skb, tot_len);
+	data_end = (void *)(long)skb->data_end;
+	data = (void *)(long)skb->data;
+	if (data + tot_len > data_end)
+		return false;
+
+	/* Verifier workaround: pointer arithmetic on pkt_end prohibited. */
 	*data_ = data;
 	*data_end_ = data_end;
+
 	*l3 = data + ETH_HLEN;
 	return true;
 }
 
+/* revalidate_data_first() initializes the provided pointers from the skb and
+ * ensures that the data is pulled in for access. Should be used the first
+ * time that the skb data is accessed, subsequent calls can be made to
+ * revalidate_data() which is cheaper.
+ * Returns true if 'skb' is long enough for an IP header of the provided type,
+ * false otherwise. */
+#define revalidate_data_first(skb, data, data_end, ip)			\
+	__revalidate_data(skb, data, data_end, (void **)ip, sizeof(**ip), true)
+
 /* revalidate_data() initializes the provided pointers from the skb.
  * Returns true if 'skb' is long enough for an IP header of the provided type,
  * false otherwise. */
-#define revalidate_data(skb, data, data_end, ip)	\
-	__revalidate_data(skb, data, data_end, (void **)ip, sizeof(**ip))
+#define revalidate_data(skb, data, data_end, ip)			\
+	__revalidate_data(skb, data, data_end, (void **)ip, sizeof(**ip), false)
 
 /* Macros for working with L3 cilium defined IPV6 addresses */
-#define BPF_V6(dst, ...)	BPF_V6_16(dst, __VA_ARGS__)
-#define BPF_V6_16(dst, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16) \
-	({										\
-		dst.p1 = bpf_htonl( (a1) << 24 |  (a2) << 16 |  (a3) << 8 |  (a4));	\
-		dst.p2 = bpf_htonl( (a5) << 24 |  (a6) << 16 |  (a7) << 8 |  (a8));	\
-		dst.p3 = bpf_htonl( (a9) << 24 | (a10) << 16 | (a11) << 8 | (a12));	\
-		dst.p4 = bpf_htonl((a13) << 24 | (a14) << 16 | (a15) << 8 | (a16));	\
+#define BPF_V6(dst, ...)	BPF_V6_1(dst, fetch_ipv6(__VA_ARGS__))
+#define BPF_V6_1(dst, ...)	BPF_V6_4(dst, __VA_ARGS__)
+#define BPF_V6_4(dst, a1, a2, a3, a4)		\
+	({					\
+		dst.p1 = a1;			\
+		dst.p2 = a2;			\
+		dst.p3 = a3;			\
+		dst.p4 = a4;			\
 	})
-
-/* Macros for building proxy port/nexthdr maps */
-#define EVAL0(...) __VA_ARGS__
-#define EVAL1(...) EVAL0 (EVAL0 (EVAL0 (__VA_ARGS__)))
-#define EVAL2(...) EVAL1 (EVAL1 (EVAL1 (__VA_ARGS__)))
-#define EVAL(...)  EVAL2 (EVAL2 (EVAL2 (__VA_ARGS__)))
-
-#define BPF_L4_MAP_OUT
-#define BPF_L4_MAP_END(...)
-#define BPF_L4_MAP_GET_END() 0, BPF_L4_MAP_END
-#define BPF_L4_MAP_NEXT0(dst, port, hdr, index, map, next, ...) next BPF_L4_MAP_OUT
-#define BPF_L4_MAP_NEXT1(dst, port, hdr, index, map, next) BPF_L4_MAP_NEXT0(dst, port, hdr, index, map, next, 0)
-#define BPF_L4_MAP_NEXT(dst, port, hdr, index, map, next) BPF_L4_MAP_NEXT1 (dst, port, hdr, index, BPF_L4_MAP_GET_END map, next)
-
-#define F(dst, port, hdr, index, map0, map1, map2)				\
-	({									\
-		dst = (dst > -1 ? dst : ((map0 && map0 == port) ?		\
-			((map2 && map2 == hdr) ? map1 : DROP_POLICY_L4) :	\
-			DROP_POLICY_L4));					\
-	});
-
-#define BPF_L4_MAP0(dst, port, hdr, index, map0, map1, map2, next, ...) \
-	F(dst, port, hdr, index, map0, map1, map2) BPF_L4_MAP_NEXT(dst, port, hdr, index, next, BPF_L4_MAP1)(dst, port, hdr, next, __VA_ARGS__)
-#define BPF_L4_MAP1(dst, port, hdr, index, map0, map1, map2, next, ...) \
-	F(dst, port, hdr, index, map0, map1, map2) BPF_L4_MAP_NEXT(dst, port, hdr, index, next, BPF_L4_MAP0)(dst, port, hdr, next, __VA_ARGS__)
-
-#define BPF_L4_MAP(dst, port, hdr, ...)				\
-	({							\
-		EVAL (BPF_L4_MAP1(dst, port, hdr, __VA_ARGS__))	\
-	})
-
-/* Examples to illustrate how to use BPF_L4_MAP and BPF_V6_16
- *
- * BPF_L4_MAP(my_map, 0, 80, 8080, 0, 1, 80, 8080, 0, (), 0)
- * BPF_V6_16(my_dst, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
- */
-
-#define PORTMAP_MAX 16
-
-struct portmap {
-	__be16 from;
-	__be16 to;
-};
 
 #define ENDPOINT_KEY_IPV4 1
 #define ENDPOINT_KEY_IPV6 2
@@ -159,7 +185,7 @@ struct endpoint_key {
 		union v6addr	ip6;
 	};
 	__u8 family;
-	__u8 pad4;
+	__u8 key;
 	__u16 pad5;
 } __attribute__((packed));
 
@@ -168,28 +194,48 @@ struct endpoint_key {
 /* Value of endpoint map */
 struct endpoint_info {
 	__u32		ifindex;
-	__u16		sec_label;
+	__u16		unused; /* used to be sec_label, no longer used */
 	__u16           lxc_id;
 	__u32		flags;
 	mac_t		mac;
 	mac_t		node_mac;
 	__u32		pad[4];
-	struct portmap  portmap[PORTMAP_MAX];
+};
+
+struct remote_endpoint_info {
+	__u32		sec_label;
+	__u32		tunnel_endpoint;
+	__u8		key;
 };
 
 struct policy_key {
 	__u32		sec_label;
 	__u16		dport;
 	__u8		protocol;
-	__u8		pad;
+	__u8		egress:1,
+			pad:7;
 };
 
 struct policy_entry {
-	__u32		action;
-	__u32		pad;
+	__be16		proxy_port;
+	__u16		pad[3];
 	__u64		packets;
 	__u64		bytes;
 };
+
+struct metrics_key {
+    __u8      reason;     //0: forwarded, >0 dropped
+    __u8      dir:2,      //1: ingress 2: egress
+              pad:6;
+    __u16     reserved[3]; // reserved for future extension
+};
+
+
+struct metrics_value {
+     __u64	count;
+     __u64	bytes;
+};
+
 
 enum {
 	CILIUM_NOTIFY_UNSPEC,
@@ -215,16 +261,24 @@ enum {
 
 #define IS_ERR(x) (unlikely((x < 0) || (x == TC_ACT_SHOT)))
 
-/* Cilium error codes, must NOT overlap with TC return codes */
-#define DROP_INVALID_SMAC	-130
-#define DROP_INVALID_DMAC	-131
+/* Cilium IPSec code to indicate packet needs to be handled
+ * by IPSec stack. Maps to TC_ACT_OK.
+ */
+#define IPSEC_ENDPOINT TC_ACT_OK
+
+/* Cilium error codes, must NOT overlap with TC return codes.
+ * These also serve as drop reasons for metrics,
+ * where reason > 0 corresponds to -(DROP_*)
+ */
+#define DROP_INVALID_SMAC	-130 /* unused */
+#define DROP_INVALID_DMAC	-131 /* unused */
 #define DROP_INVALID_SIP	-132
 #define DROP_POLICY		-133
 #define DROP_INVALID		-134
 #define DROP_CT_INVALID_HDR	-135
-#define DROP_CT_MISSING_ACK	-136
+#define DROP_CT_MISSING_ACK	-136 /* unused */
 #define DROP_CT_UNKNOWN_PROTO	-137
-#define DROP_CT_CANT_CREATE	-138 /* unused */
+#define DROP_CT_CANT_CREATE_	-138 /* unused */
 #define DROP_UNKNOWN_L3		-139
 #define DROP_MISSED_TAIL_CALL	-140
 #define DROP_WRITE_ERROR	-141
@@ -234,43 +288,136 @@ enum {
 #define DROP_UNKNOWN_ICMP6_CODE	-145
 #define DROP_UNKNOWN_ICMP6_TYPE	-146
 #define DROP_NO_TUNNEL_KEY	-147
-#define DROP_NO_TUNNEL_OPT	-148
-#define DROP_INVALID_GENEVE	-149
+#define DROP_NO_TUNNEL_OPT_	-148 /* unused */
+#define DROP_INVALID_GENEVE_	-149 /* unused */
 #define DROP_UNKNOWN_TARGET	-150
-#define DROP_NON_LOCAL		-151
-#define DROP_NO_LXC		-152
+#define DROP_UNROUTABLE		-151
+#define DROP_NO_LXC		-152 /* unused */
 #define DROP_CSUM_L3		-153
 #define DROP_CSUM_L4		-154
 #define DROP_CT_CREATE_FAILED	-155
 #define DROP_INVALID_EXTHDR	-156
 #define DROP_FRAG_NOSUPPORT	-157
 #define DROP_NO_SERVICE		-158
-#define DROP_POLICY_L4		-159
+#define DROP_POLICY_L4		-159 /* unused */
 #define DROP_NO_TUNNEL_ENDPOINT -160
+#define DROP_PROXYMAP_CREATE_FAILED_	-161 /* unused */
+#define DROP_POLICY_CIDR		-162 /* unused */
+#define DROP_UNKNOWN_CT			-163
+#define DROP_HOST_UNREACHABLE		-164
+#define DROP_NO_CONFIG		-165
+#define DROP_UNSUPPORTED_L2		-166
+#define DROP_NAT_NO_MAPPING	-167
+#define DROP_NAT_UNSUPP_PROTO	-168
+#define DROP_NO_FIB		-169
+#define DROP_ENCAP_PROHIBITED	-170
+#define DROP_INVALID_IDENTITY	-171
+#define DROP_UNKNOWN_SENDER	-172
 
-
-/* Magic skb->mark markers which identify packets originating from the proxy
- *
- * The upper 16 bits contain the magic marker values which indicate whether
- * the packet is coming from an ingress or egress proxy.
- *
- * The lower 16 bits may contain the security identity of the original source
- * endpoint.
+/* Cilium metrics reasons for forwarding packets and other stats.
+ * If reason is larger than below then this is a drop reason and
+ * value corresponds to -(DROP_*), see above.
  */
-#define MARK_MAGIC_PROXY_MASK		0xFFF
-#define MARK_MAGIC_PROXY_INGRESS	0xFEA
-#define MARK_MAGIC_PROXY_EGRESS		0xFEB
-#define MARK_IDENTITY_MASK		(0xFFFF << 16)
+#define REASON_FORWARDED	0
+#define REASON_PLAINTEXT	3
+#define REASON_DECRYPT		4
+#define REASON_LB_NO_SLAVE	5
+#define REASON_LB_NO_BACKEND	6
+#define REASON_LB_REVNAT_UPDATE	7
+#define REASON_LB_REVNAT_STALE	8
 
-#define SOURCE_INGRESS_PROXY 1
-#define SOURCE_EGRESS_PROXY 2
+/* Cilium metrics direction for dropping/forwarding packet */
+#define METRIC_INGRESS  1
+#define METRIC_EGRESS   2
+
+/* Magic skb->mark identifies packets origination and encryption status.
+ *
+ * The upper 16 bits plus lower 8 bits (e.g. mask 0XFFFF00FF) contain the
+ * packets security identity. The lower/upper halves are swapped to recover
+ * the identity.
+ *
+ * The 4 bits at 0X0F00 provide
+ *  - the magic marker values which indicate whether the packet is coming from
+ *    an ingress or egress proxy, a local process and its current encryption
+ *    status.
+ *
+ * The 4 bits at 0xF000 provide
+ *  - the key index to use for encryption when multiple keys are in-flight.
+ *    In the IPsec case this becomes the SPI on the wire.
+ */
+#define MARK_MAGIC_HOST_MASK		0x0F00
+#define MARK_MAGIC_PROXY_INGRESS	0x0A00
+#define MARK_MAGIC_PROXY_EGRESS		0x0B00
+#define MARK_MAGIC_HOST			0x0C00
+#define MARK_MAGIC_DECRYPT		0x0D00
+#define MARK_MAGIC_ENCRYPT		0x0E00
+#define MARK_MAGIC_IDENTITY		0x0F00 /* mark carries identity */
+#define MARK_MAGIC_TO_PROXY		0x0200
+
+#define MARK_MAGIC_KEY_ID		0xF000
+#define MARK_MAGIC_KEY_MASK		0xFF00
+
+#define MARK_MAGIC_SNAT_DONE		0x0500
 
 /**
- * get_identity_via_proxy - returns source identity as specified by the proxy
+ * get_identity - returns source identity from the mark field
  */
-static inline int __inline__ get_identity_via_proxy(struct __sk_buff *skb)
+static inline int __inline__ get_identity(struct __sk_buff *skb)
 {
-	return skb->mark >> 16;
+	return ((skb->mark & 0xFF) << 16) | skb->mark >> 16;
+}
+
+static inline void __inline__ set_encrypt_dip(struct __sk_buff *skb, __u32 ip_endpoint)
+{
+	skb->cb[4] = ip_endpoint;
+}
+
+/**
+ * set_identity - pushes 24 bit identity into skb mark value.
+ */
+static inline void __inline__ set_identity(struct __sk_buff *skb, __u32 identity)
+{
+	skb->mark = skb->mark & MARK_MAGIC_KEY_MASK;
+	skb->mark |= ((identity & 0xFFFF) << 16) | ((identity & 0xFF0000) >> 16);
+}
+
+static inline void __inline__ set_identity_cb(struct __sk_buff *skb, __u32 identity)
+{
+	skb->cb[1] = identity;
+}
+
+/* We cap key index at 4 bits because mark value is used to map skb to key */
+#define MAX_KEY_INDEX 15
+
+/* encrypt_key is the index into the encrypt map */
+struct encrypt_key {
+	__u32 ctx;
+} __attribute__((packed));
+
+/* encrypt_config is the current encryption context on the node */
+struct encrypt_config {
+	__u8 encrypt_key;
+} __attribute__((packed));
+
+/**
+ * or_encrypt_key - mask and shift key into encryption format
+ */
+static inline __u32 __inline__ or_encrypt_key(__u8 key)
+{
+	return (((__u32)key & 0x0F) << 12) | MARK_MAGIC_ENCRYPT;
+}
+
+/**
+ * set_encrypt_key - pushes 8 bit key and encryption marker into skb mark value.
+ */
+static inline void __inline__ set_encrypt_key(struct __sk_buff *skb, __u8 key)
+{
+	skb->mark = or_encrypt_key(key);
+}
+
+static inline void __inline__ set_encrypt_key_cb(struct __sk_buff *skb, __u8 key)
+{
+	skb->cb[0] = or_encrypt_key(key);
 }
 
 /*
@@ -279,7 +426,9 @@ static inline int __inline__ get_identity_via_proxy(struct __sk_buff *skb)
  * cilium_host @egress
  *   bpf_host -> bpf_lxc
  */
-#define TC_INDEX_F_SKIP_PROXY		1
+#define TC_INDEX_F_SKIP_INGRESS_PROXY	1
+#define TC_INDEX_F_SKIP_EGRESS_PROXY	2
+#define TC_INDEX_F_SKIP_NODEPORT	3
 
 /* skb->cb[] usage: */
 enum {
@@ -287,6 +436,7 @@ enum {
 	CB_IFINDEX,
 	CB_POLICY,
 	CB_NAT46_STATE,
+#define CB_NAT		CB_NAT46_STATE	/* Alias, non-overlapping */
 	CB_CT_STATE,
 };
 
@@ -297,8 +447,20 @@ enum {
 	NAT46,
 };
 
+#define TUPLE_F_OUT		0	/* Outgoing flow */
+#define TUPLE_F_IN		1	/* Incoming flow */
+#define TUPLE_F_RELATED		2	/* Flow represents related packets */
+#define TUPLE_F_SERVICE		4	/* Flow represents service/slave map */
+
 #define CT_EGRESS 0
 #define CT_INGRESS 1
+#define CT_SERVICE 2
+
+#ifdef ENABLE_NODEPORT
+#define NAT_MIN_EGRESS		NODEPORT_PORT_MIN
+#else
+#define NAT_MIN_EGRESS		EPHERMERAL_MIN
+#endif
 
 enum {
 	CT_NEW,
@@ -308,19 +470,25 @@ enum {
 };
 
 struct ipv6_ct_tuple {
+	/* Address fields are reversed, i.e.,
+	 * these field names are correct for reply direction traffic. */
 	union v6addr	daddr;
 	union v6addr	saddr;
-	/* The order of dport+sport must not be changed */
+	/* The order of dport+sport must not be changed!
+	 * These field names are correct for original direction traffic. */
 	__be16		dport;
 	__be16		sport;
 	__u8		nexthdr;
 	__u8		flags;
-};
+} __attribute__((packed));
 
 struct ipv4_ct_tuple {
+	/* Address fields are reversed, i.e.,
+	 * these field names are correct for reply direction traffic. */
 	__be32		daddr;
 	__be32		saddr;
-	/* The order of dport+sport must not be changed */
+	/* The order of dport+sport must not be changed!
+	 * These field names are correct for original direction traffic. */
 	__be16		dport;
 	__be16		sport;
 	__u8		nexthdr;
@@ -337,10 +505,24 @@ struct ct_entry {
 	      tx_closing:1,
 	      nat46:1,
 	      lb_loopback:1,
-	      reserve:12;
+	      seen_non_syn:1,
+	      node_port:1,
+	      proxy_redirect:1, // Connection is redirected to a proxy
+	      reserved:9;
 	__u16 rev_nat_index;
-	__be16 proxy_port;
-	__u32 src_sec_id;
+	__u16 backend_id; /* Populated only in v1.6+ BPF code. */
+
+	/* *x_flags_seen represents the OR of all TCP flags seen for the
+	 * transmit/receive direction of this entry. */
+	__u8  tx_flags_seen;
+	__u8  rx_flags_seen;
+
+	__u32 src_sec_id; /* Used from userspace proxies, do not change offset! */
+
+	/* last_*x_report is a timestamp of the last time a monitor
+	 * notification was sent for the transmit/receive direction. */
+	__u32 last_tx_report;
+	__u32 last_rx_report;
 };
 
 struct lb6_key {
@@ -357,24 +539,61 @@ struct lb6_service {
 	__u16 weight;
 } __attribute__((packed));
 
+struct lb6_key_v2 {
+	union v6addr address;	/* Service virtual IPv6 address */
+	__be16 dport;		/* L4 port filter, if unset, all ports apply */
+	__u16 slave;		/* Backend iterator, 0 indicates the master service */
+	__u8 proto;		/* L4 protocol, currently not used (set to 0) */
+	__u8 pad[3];
+};
+
+/* See lb4_service_v2 comments */
+struct lb6_service_v2 {
+	__u32 backend_id;
+	__u16 count;
+	__u16 rev_nat_index;
+	__u16 weight;
+	__u16 pad;
+};
+
+/* See lb4_backend comments */
+struct lb6_backend {
+	union v6addr address;
+	__be16 port;
+	__u8 proto;
+	__u8 pad;
+};
+
 struct lb6_reverse_nat {
 	union v6addr address;
 	__be16 port;
 } __attribute__((packed));
 
-struct lb4_key {
-	__be32 address;
-        __be16 dport;		/* L4 port filter, if unset, all ports apply */
+struct lb4_key_v2 {
+	__be32 address;		/* Service virtual IPv4 address */
+	__be16 dport;		/* L4 port filter, if unset, all ports apply */
 	__u16 slave;		/* Backend iterator, 0 indicates the master service */
-} __attribute__((packed));
+	__u8 proto;		/* L4 protocol, currently not used (set to 0) */
+	__u8 pad[3];
+};
 
-struct lb4_service {
-	__be32 target;
-	__be16 port;
+struct lb4_service_v2 {
+	__u32 backend_id;	/* Backend ID in lb4_backends */
+	/* For the master service, count denotes number of service endpoints.
+	 * For service endpoints, zero. (Previously, legacy service ID)
+	 */
 	__u16 count;
-	__u16 rev_nat_index;
-	__u16 weight;
-} __attribute__((packed));
+	__u16 rev_nat_index;	/* Reverse NAT ID in lb4_reverse_nat */
+	__u16 weight;		/* Currently not used */
+	__u16 pad;
+};
+
+struct lb4_backend {
+	__be32 address;		/* Service endpoint IPv4 address */
+	__be16 port;		/* L4 port filter */
+	__u8 proto;		/* L4 protocol, currently not used (set to 0) */
+	__u8 pad;
+};
 
 struct lb4_reverse_nat {
 	__be32 address;
@@ -390,47 +609,16 @@ struct lb_sequence {
 struct ct_state {
 	__u16 rev_nat_index;
 	__u16 loopback:1,
-	      reserved:15;
+	      node_port:1,
+	      proxy_redirect:1, // Connection is redirected to a proxy
+	      reserved:13;
 	__be16 orig_dport;
-	__be16 proxy_port;
 	__be32 addr;
 	__be32 svc_addr;
 	__u32 src_sec_id;
+	__u16 unused;
+	__u16 backend_id;	/* Backend ID in lb4_backends */
 };
-
-#define PROXY_DEFAULT_LIFETIME	360
-
-struct proxy4_tbl_key {
-	__be32 saddr;
-	__be16 dport; /* dport must be in front of sport, loaded with 4 bytes read */
-	__be16 sport;
-	__u8 nexthdr;
-	__u8 pad;
-} __attribute__((packed));
-
-struct proxy4_tbl_value {
-	__be32 orig_daddr;
-	__be16 orig_dport;
-	__u16 pad;
-	__u32 identity;
-	__u32 lifetime;
-} __attribute__((packed));
-
-struct proxy6_tbl_key {
-	union v6addr saddr;
-	__be16 dport;
-	__be16 sport;
-	__u8 nexthdr;
-	__u8 pad;
-} __attribute__((packed));
-
-struct proxy6_tbl_value {
-	union v6addr orig_daddr;
-	__be16 orig_dport;
-	__u16 pad;
-	__u32 identity;
-	__u32 lifetime;
-} __attribute__((packed));
 
 /**
  * relax_verifier is a dummy helper call to introduce a pruning checkpoing to
@@ -441,6 +629,34 @@ static inline void relax_verifier(void)
 {
 	int foo = 0;
 	csum_diff(0, 0, &foo, 1, 0);
+}
+
+static inline int redirect_self(struct __sk_buff *skb)
+{
+	/* Looping back the packet into the originating netns. In
+	 * case of veth, it's xmit'ing into the hosts' veth device
+	 * such that we end up on ingress in the peer. For ipvlan
+	 * slave it's redirect to ingress as we are attached on the
+	 * slave in netns already.
+	 */
+#ifdef ENABLE_HOST_REDIRECT
+	return redirect(skb->ifindex, 0);
+#else
+	return redirect(skb->ifindex, BPF_F_INGRESS);
+#endif
+}
+
+static inline int redirect_peer(int ifindex, uint32_t flags)
+{
+	/* If our datapath has proper redirect support, we make use
+	 * of it here, otherwise we terminate tc processing by letting
+	 * stack handle forwarding e.g. in ipvlan case.
+	 */
+#ifdef ENABLE_HOST_REDIRECT
+	return redirect(ifindex, flags);
+#else
+	return TC_ACT_OK;
+#endif /* ENABLE_HOST_REDIRECT */
 }
 
 #endif

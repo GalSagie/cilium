@@ -6,10 +6,9 @@ package endpoint
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"context"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
@@ -17,7 +16,7 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // NewPatchEndpointIDParams creates a new PatchEndpointIDParams object
@@ -67,8 +66,8 @@ type PatchEndpointIDParams struct {
 	/*Endpoint*/
 	Endpoint *models.EndpointChangeRequest
 	/*ID
-	  String describing an endpoint with the format `[prefix:]id`. If no prefix
-	is specified, a prefix of `cilium-local:` is assumed. Not all endpoints
+	  String describing an endpoint with the format ``[prefix:]id``. If no prefix
+	is specified, a prefix of ``cilium-local:`` is assumed. Not all endpoints
 	will be addressable by all endpoint ID prefixes with the exception of the
 	local Cilium UUID which is assigned to all endpoints.
 
@@ -152,12 +151,10 @@ func (o *PatchEndpointIDParams) WriteToRequest(r runtime.ClientRequest, reg strf
 	}
 	var res []error
 
-	if o.Endpoint == nil {
-		o.Endpoint = new(models.EndpointChangeRequest)
-	}
-
-	if err := r.SetBodyParam(o.Endpoint); err != nil {
-		return err
+	if o.Endpoint != nil {
+		if err := r.SetBodyParam(o.Endpoint); err != nil {
+			return err
+		}
 	}
 
 	// path param id

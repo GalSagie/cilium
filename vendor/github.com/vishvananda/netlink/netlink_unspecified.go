@@ -48,6 +48,10 @@ func LinkSetVfVlan(link Link, vf, vlan int) error {
 	return ErrNotImplemented
 }
 
+func LinkSetVfVlanQos(link Link, vf, vlan, qos int) error {
+	return ErrNotImplemented
+}
+
 func LinkSetVfTxRate(link Link, vf, rate int) error {
 	return ErrNotImplemented
 }
@@ -105,6 +109,10 @@ func LinkSetRootBlock(link Link, mode bool) error {
 }
 
 func LinkSetFlood(link Link, mode bool) error {
+	return ErrNotImplemented
+}
+
+func LinkSetTxQLen(link Link, qlen int) error {
 	return ErrNotImplemented
 }
 

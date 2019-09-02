@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@
 package lbmap
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"unsafe"
@@ -24,31 +22,126 @@ import (
 	"github.com/cilium/cilium/common/types"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/u8proto"
 )
 
 var (
+	// Service6Map represents the BPF map for services in IPv6 load balancer
 	Service6Map = bpf.NewMap("cilium_lb6_services",
 		bpf.MapTypeHash,
+		&Service6Key{},
 		int(unsafe.Sizeof(Service6Key{})),
+		&Service6Value{},
 		int(unsafe.Sizeof(Service6Value{})),
-		maxEntries, 0)
+		MaxEntries,
+		0, 0,
+		func(key []byte, value []byte, mapKey bpf.MapKey, mapValue bpf.MapValue) (bpf.MapKey, bpf.MapValue, error) {
+			svcKey, svcVal := mapKey.(*Service6Key), mapValue.(*Service6Value)
+
+			if _, _, err := bpf.ConvertKeyValue(key, value, svcKey, svcVal); err != nil {
+				return nil, nil, err
+			}
+
+			return svcKey.ToNetwork(), svcVal.ToNetwork(), nil
+		}).WithCache()
+	Service6MapV2 = bpf.NewMap("cilium_lb6_services_v2",
+		bpf.MapTypeHash,
+		&Service6KeyV2{},
+		int(unsafe.Sizeof(Service6KeyV2{})),
+		&Service6ValueV2{},
+		int(unsafe.Sizeof(Service6ValueV2{})),
+		MaxEntries,
+		0, 0,
+		func(key []byte, value []byte, mapKey bpf.MapKey, mapValue bpf.MapValue) (bpf.MapKey, bpf.MapValue, error) {
+			svcKey, svcVal := mapKey.(*Service6KeyV2), mapValue.(*Service6ValueV2)
+
+			if _, _, err := bpf.ConvertKeyValue(key, value, svcKey, svcVal); err != nil {
+				return nil, nil, err
+			}
+
+			return svcKey.ToNetwork(), svcVal.ToNetwork(), nil
+		}).WithCache()
+	Backend6Map = bpf.NewMap("cilium_lb6_backends",
+		bpf.MapTypeHash,
+		&Backend6Key{},
+		int(unsafe.Sizeof(Backend6Key{})),
+		&Backend6Value{},
+		int(unsafe.Sizeof(Backend6Value{})),
+		MaxEntries,
+		0, 0,
+		func(key []byte, value []byte, mapKey bpf.MapKey, mapValue bpf.MapValue) (bpf.MapKey, bpf.MapValue, error) {
+			backendVal := mapValue.(*Backend6Value)
+
+			if _, _, err := bpf.ConvertKeyValue(key, value, mapKey, backendVal); err != nil {
+				return nil, nil, err
+			}
+
+			return mapKey, backendVal.ToNetwork(), nil
+		}).WithCache()
+	// RevNat6Map represents the BPF map for reverse NAT in IPv6 load balancer
 	RevNat6Map = bpf.NewMap("cilium_lb6_reverse_nat",
 		bpf.MapTypeHash,
+		&RevNat6Key{},
 		int(unsafe.Sizeof(RevNat6Key{})),
+		&RevNat6Value{},
 		int(unsafe.Sizeof(RevNat6Value{})),
-		maxEntries, 0)
+		MaxEntries,
+		0, 0,
+		func(key []byte, value []byte, mapKey bpf.MapKey, mapValue bpf.MapValue) (bpf.MapKey, bpf.MapValue, error) {
+			revKey, revNat := mapKey.(*RevNat6Key), mapValue.(*RevNat6Value)
+
+			if _, _, err := bpf.ConvertKeyValue(key, value, revKey, revNat); err != nil {
+				return nil, nil, err
+			}
+
+			return revKey.ToNetwork(), revNat.ToNetwork(), nil
+		}).WithCache()
+	// RRSeq6Map represents the BPF map for wrr sequences in IPv6 load balancer
 	RRSeq6Map = bpf.NewMap("cilium_lb6_rr_seq",
 		bpf.MapTypeHash,
+		&Service6Key{},
 		int(unsafe.Sizeof(Service6Key{})),
+		&RRSeqValue{},
 		int(unsafe.Sizeof(RRSeqValue{})),
-		maxFrontEnds, 0)
+		maxFrontEnds,
+		0, 0,
+		func(key []byte, value []byte, mapKey bpf.MapKey, mapValue bpf.MapValue) (bpf.MapKey, bpf.MapValue, error) {
+			svcKey := mapKey.(*Service6Key)
+
+			if _, _, err := bpf.ConvertKeyValue(key, value, svcKey, mapValue); err != nil {
+				return nil, nil, err
+			}
+
+			return svcKey.ToNetwork(), mapValue, nil
+		}).WithCache()
+	// RRSeq6MapV2 represents the BPF map for wrr sequences in IPv6 load balancer
+	RRSeq6MapV2 = bpf.NewMap("cilium_lb6_rr_seq_v2",
+		bpf.MapTypeHash,
+		&Service6KeyV2{},
+		int(unsafe.Sizeof(Service6KeyV2{})),
+		&RRSeqValue{},
+		int(unsafe.Sizeof(RRSeqValue{})),
+		maxFrontEnds,
+		0, 0,
+		func(key []byte, value []byte, mapKey bpf.MapKey, mapValue bpf.MapValue) (bpf.MapKey, bpf.MapValue, error) {
+			svcKey := mapKey.(*Service6KeyV2)
+
+			if _, _, err := bpf.ConvertKeyValue(key, value, svcKey, mapValue); err != nil {
+				return nil, nil, err
+			}
+
+			return svcKey.ToNetwork(), mapValue, nil
+		}).WithCache()
 )
 
 // Service6Key must match 'struct lb6_key' in "bpf/lib/common.h".
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type Service6Key struct {
-	Address types.IPv6
-	Port    uint16
-	Slave   uint16
+	Address types.IPv6 `align:"address"`
+	Port    uint16     `align:"dport"`
+	Slave   uint16     `align:"slave"`
 }
 
 func NewService6Key(ip net.IP, port uint16, slave uint16) *Service6Key {
@@ -98,12 +191,14 @@ func (k *Service6Key) RevNatValue() RevNatValue {
 }
 
 // Service6Value must match 'struct lb6_service' in "bpf/lib/common.h".
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type Service6Value struct {
-	Address types.IPv6
-	Port    uint16
-	Count   uint16
-	RevNat  uint16
-	Weight  uint16
+	Address types.IPv6 `align:"target"`
+	Port    uint16     `align:"port"`
+	Count   uint16     `align:"count"`
+	RevNat  uint16     `align:"rev_nat_index"`
+	Weight  uint16     `align:"weight"`
 }
 
 func NewService6Value(count uint16, target net.IP, port uint16, revNat uint16, weight uint16) *Service6Value {
@@ -121,12 +216,14 @@ func NewService6Value(count uint16, target net.IP, port uint16, revNat uint16, w
 
 func (s *Service6Value) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(s) }
 func (s *Service6Value) SetPort(port uint16)         { s.Port = port }
+func (s *Service6Value) GetPort() uint16             { return s.Port }
 func (s *Service6Value) SetCount(count int)          { s.Count = uint16(count) }
 func (s *Service6Value) GetCount() int               { return int(s.Count) }
 func (s *Service6Value) SetRevNat(id int)            { s.RevNat = uint16(id) }
 func (s *Service6Value) RevNatKey() RevNatKey        { return &RevNat6Key{s.RevNat} }
 func (s *Service6Value) SetWeight(weight uint16)     { s.Weight = weight }
 func (s *Service6Value) GetWeight() uint16           { return s.Weight }
+func (s *Service6Value) IsIPv6() bool                { return true }
 
 func (s *Service6Value) SetAddress(ip net.IP) error {
 	if ip.To4() != nil {
@@ -135,6 +232,10 @@ func (s *Service6Value) SetAddress(ip net.IP) error {
 
 	copy(s.Address[:], ip.To16())
 	return nil
+}
+
+func (s *Service6Value) GetAddress() net.IP {
+	return s.Address.IP()
 }
 
 // ToNetwork converts Service6Value ports to network byte order.
@@ -159,40 +260,12 @@ func (s *Service6Value) String() string {
 	return fmt.Sprintf("[%s]:%d (%d)", s.Address, s.Port, s.RevNat)
 }
 
-func Service6DumpParser(key []byte, value []byte) (bpf.MapKey, bpf.MapValue, error) {
-	keyBuf := bytes.NewBuffer(key)
-	valueBuf := bytes.NewBuffer(value)
-	svcKey := Service6Key{}
-	svcVal := Service6Value{}
-
-	if err := binary.Read(keyBuf, byteorder.Native, &svcKey); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
-	}
-
-	if err := binary.Read(valueBuf, byteorder.Native, &svcVal); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert value: %s", err)
-	}
-
-	return svcKey.ToNetwork(), svcVal.ToNetwork(), nil
+func (s *Service6Value) BackendAddrID() BackendAddrID {
+	return BackendAddrID(fmt.Sprintf("[%s]:%d", s.Address, s.Port))
 }
 
-func Service6RRSeqDumpParser(key []byte, value []byte) (bpf.MapKey, bpf.MapValue, error) {
-	keyBuf := bytes.NewBuffer(key)
-	valueBuf := bytes.NewBuffer(value)
-	svcKey := Service6Key{}
-	svcVal := RRSeqValue{}
-
-	if err := binary.Read(keyBuf, byteorder.Native, &svcKey); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
-	}
-
-	if err := binary.Read(valueBuf, byteorder.Native, &svcVal); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
-	}
-
-	return svcKey.ToNetwork(), svcVal, nil
-}
-
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type RevNat6Key struct {
 	Key uint16
 }
@@ -215,6 +288,8 @@ func (v *RevNat6Key) ToNetwork() RevNatKey {
 	return &n
 }
 
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type RevNat6Value struct {
 	Address types.IPv6
 	Port    uint16
@@ -240,21 +315,180 @@ func (v *RevNat6Value) ToNetwork() RevNatValue {
 	return &n
 }
 
-func RevNat6DumpParser(key []byte, value []byte) (bpf.MapKey, bpf.MapValue, error) {
-	var revNat RevNat6Value
-	var ukey uint16
-
-	keyBuf := bytes.NewBuffer(key)
-	valueBuf := bytes.NewBuffer(value)
-
-	if err := binary.Read(keyBuf, byteorder.Native, &ukey); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
-	}
-	revKey := NewRevNat6Key(ukey)
-
-	if err := binary.Read(valueBuf, byteorder.Native, &revNat); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert value: %s", err)
-	}
-
-	return revKey.ToNetwork(), revNat.ToNetwork(), nil
+// Service6KeyV2 must match 'struct lb6_key_v2' in "bpf/lib/common.h".
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
+type Service6KeyV2 struct {
+	Address types.IPv6 `align:"address"`
+	Port    uint16     `align:"dport"`
+	Slave   uint16     `align:"slave"`
+	Proto   uint8      `align:"proto"`
+	Pad     pad3uint8
 }
+
+func NewService6KeyV2(ip net.IP, port uint16, proto u8proto.U8proto, slave uint16) *Service6KeyV2 {
+	key := Service6KeyV2{
+		Port:  port,
+		Proto: uint8(proto),
+		Slave: slave,
+	}
+
+	copy(key.Address[:], ip.To16())
+
+	return &key
+}
+
+func (k *Service6KeyV2) String() string {
+	return fmt.Sprintf("[%s]:%d", k.Address, k.Port)
+}
+
+func (k *Service6KeyV2) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+func (k *Service6KeyV2) NewValue() bpf.MapValue    { return &Service6ValueV2{} }
+func (k *Service6KeyV2) IsIPv6() bool              { return true }
+func (k *Service6KeyV2) Map() *bpf.Map             { return Service6MapV2 }
+func (k *Service6KeyV2) RRMap() *bpf.Map           { return RRSeq6MapV2 }
+func (k *Service6KeyV2) SetSlave(slave int)        { k.Slave = uint16(slave) }
+func (k *Service6KeyV2) GetSlave() int             { return int(k.Slave) }
+func (k *Service6KeyV2) GetAddress() net.IP        { return k.Address.IP() }
+func (k *Service6KeyV2) GetPort() uint16           { return k.Port }
+func (k *Service6KeyV2) MapDelete() error          { return k.Map().Delete(k.ToNetwork()) }
+
+func (k *Service6KeyV2) ToNetwork() ServiceKeyV2 {
+	n := *k
+	n.Port = byteorder.HostToNetwork(n.Port).(uint16)
+	return &n
+}
+
+// Service6ValueV2 must match 'struct lb6_service_v2' in "bpf/lib/common.h".
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
+type Service6ValueV2 struct {
+	BackendID uint32 `align:"backend_id"`
+	Count     uint16 `align:"count"`
+	RevNat    uint16 `align:"rev_nat_index"`
+	Weight    uint16 `align:"weight"`
+	Pad       uint16
+}
+
+func NewService6ValueV2(count uint16, backendID loadbalancer.BackendID, revNat uint16, weight uint16) *Service6ValueV2 {
+	svc := Service6ValueV2{
+		Count:     count,
+		BackendID: uint32(backendID),
+		RevNat:    revNat,
+		Weight:    weight,
+	}
+
+	return &svc
+}
+
+func (s *Service6ValueV2) String() string {
+	return fmt.Sprintf("%d (%d)", s.BackendID, s.RevNat)
+}
+
+func (s *Service6ValueV2) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(s) }
+
+func (s *Service6ValueV2) SetCount(count int)      { s.Count = uint16(count) }
+func (s *Service6ValueV2) GetCount() int           { return int(s.Count) }
+func (s *Service6ValueV2) SetRevNat(id int)        { s.RevNat = uint16(id) }
+func (s *Service6ValueV2) GetRevNat() int          { return int(s.RevNat) }
+func (s *Service6ValueV2) SetWeight(weight uint16) { s.Weight = weight }
+func (s *Service6ValueV2) GetWeight() uint16       { return s.Weight }
+func (s *Service6ValueV2) RevNatKey() RevNatKey    { return &RevNat6Key{s.RevNat} }
+
+func (s *Service6ValueV2) SetBackendID(id loadbalancer.BackendID) {
+	s.BackendID = uint32(id)
+}
+func (s *Service6ValueV2) GetBackendID() loadbalancer.BackendID {
+	return loadbalancer.BackendID(s.BackendID)
+}
+
+func (s *Service6ValueV2) ToNetwork() ServiceValueV2 {
+	n := *s
+	n.RevNat = byteorder.HostToNetwork(n.RevNat).(uint16)
+	n.Weight = byteorder.HostToNetwork(n.Weight).(uint16)
+	return &n
+}
+
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
+type Backend6Key struct {
+	ID loadbalancer.BackendID
+}
+
+func NewBackend6Key(id loadbalancer.BackendID) *Backend6Key {
+	return &Backend6Key{ID: id}
+}
+
+func (k *Backend6Key) String() string                  { return fmt.Sprintf("%d", k.ID) }
+func (k *Backend6Key) GetKeyPtr() unsafe.Pointer       { return unsafe.Pointer(k) }
+func (k *Backend6Key) NewValue() bpf.MapValue          { return &Backend6Value{} }
+func (k *Backend6Key) Map() *bpf.Map                   { return Backend6Map }
+func (k *Backend6Key) SetID(id loadbalancer.BackendID) { k.ID = id }
+func (k *Backend6Key) GetID() loadbalancer.BackendID   { return k.ID }
+
+// Backend6Value must match 'struct lb6_backend' in "bpf/lib/common.h".
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
+type Backend6Value struct {
+	Address types.IPv6      `align:"address"`
+	Port    uint16          `align:"port"`
+	Proto   u8proto.U8proto `align:"proto"`
+	Pad     uint8
+}
+
+func NewBackend6Value(ip net.IP, port uint16, proto u8proto.U8proto) (*Backend6Value, error) {
+	ip6 := ip.To16()
+	if ip6 == nil {
+		return nil, fmt.Errorf("Not an IPv6 address")
+	}
+
+	val := Backend6Value{
+		Port:  port,
+		Proto: proto,
+	}
+	copy(val.Address[:], ip.To16())
+
+	return &val, nil
+}
+
+func (v *Backend6Value) String() string {
+	return fmt.Sprintf("%s://[%s]:%d", v.Proto, v.Address, v.Port)
+}
+
+func (v *Backend6Value) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
+
+func (b *Backend6Value) GetAddress() net.IP { return b.Address.IP() }
+func (b *Backend6Value) GetPort() uint16    { return b.Port }
+
+func (b *Backend6Value) BackendAddrID() BackendAddrID {
+	return BackendAddrID(fmt.Sprintf("[%s]:%d", b.Address, b.Port))
+}
+
+func (v *Backend6Value) ToNetwork() BackendValue {
+	n := *v
+	n.Port = byteorder.HostToNetwork(n.Port).(uint16)
+	return &n
+}
+
+type Backend6 struct {
+	Key   *Backend6Key
+	Value *Backend6Value
+}
+
+func NewBackend6(id loadbalancer.BackendID, ip net.IP, port uint16, proto u8proto.U8proto) (*Backend6, error) {
+	val, err := NewBackend6Value(ip, port, proto)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Backend6{
+		Key:   NewBackend6Key(id),
+		Value: val,
+	}, nil
+}
+
+func (b *Backend6) IsIPv6() bool                  { return true }
+func (b *Backend6) Map() *bpf.Map                 { return Backend6Map }
+func (b *Backend6) GetID() loadbalancer.BackendID { return b.Key.GetID() }
+func (b *Backend6) GetKey() BackendKey            { return b.Key }
+func (b *Backend6) GetValue() BackendValue        { return b.Value }

@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@
 package api
 
 import (
-	"regexp"
-
 	"github.com/cilium/cilium/pkg/labels"
 )
 
@@ -64,529 +62,63 @@ type Rule struct {
 	Description string `json:"description,omitempty"`
 }
 
-// Entity specifies the class of receiver/sender endpoints that do not have individual identities.
-// Entities are used to describe "outside of cluster", "host", etc.
-type Entity string
-
-const (
-	// EntityWorld is an entity that represents traffic external to endpoint's cluster
-	EntityWorld Entity = "world"
-	// EntityHost is an entity that represents traffic within endpoint host
-	EntityHost Entity = "host"
-)
-
-// EntitySelectorMapping maps special entity names that come in policies to selectors
-var EntitySelectorMapping = map[Entity]EndpointSelector{
-	EntityWorld: NewESFromLabels(&labels.Label{
-		Key:    labels.IDNameWorld,
-		Value:  "",
-		Source: labels.LabelSourceReserved,
-	}),
-	EntityHost: NewESFromLabels(&labels.Label{
-		Key:    labels.IDNameHost,
-		Value:  "",
-		Source: labels.LabelSourceReserved,
-	}),
+// NewRule builds a new rule with no selector and no policy.
+func NewRule() *Rule {
+	return &Rule{}
 }
 
-// IngressRule contains all rule types which can be applied at ingress,
-// i.e. network traffic that originates outside of the endpoint and
-// is entering the endpoint selected by the endpointSelector.
-//
-// - All members of this structure are optional. If omitted or empty, the
-//   member will have no effect on the rule.
-//
-// - If multiple members are set, all of them need to match in order for
-//   the rule to take effect. The exception to this rule is FromRequires field;
-//   the effects of any Requires field in any rule will apply to all other
-//   rules as well.
-//
-// - For now, combining ToPorts, FromCIDR, and FromEndpoints in the same rule
-//   is not supported and any such rules will be rejected. In the future, this
-//   will be supported and if multiple members of this structure are specified,
-//   then all members must match in order for the rule to take effect. The
-//   exception to this rule is the Requires field, the effects of any Requires
-//   field in any rule will apply to all other rules as well.
-type IngressRule struct {
-	// FromEndpoints is a list of endpoints identified by an
-	// EndpointSelector which are allowed to communicate with the endpoint
-	// subject to the rule.
-	//
-	// Example:
-	// Any endpoint with the label "role=backend" can be consumed by any
-	// endpoint carrying the label "role=frontend".
-	//
-	// +optional
-	FromEndpoints []EndpointSelector `json:"fromEndpoints,omitempty"`
-
-	// FromRequires is a list of additional constraints which must be met
-	// in order for the selected endpoints to be reachable. These
-	// additional constraints do no by itself grant access privileges and
-	// must always be accompanied with at least one matching FromEndpoints.
-	//
-	// Example:
-	// Any Endpoint with the label "team=A" requires consuming endpoint
-	// to also carry the label "team=A".
-	//
-	// +optional
-	FromRequires []EndpointSelector `json:"fromRequires,omitempty"`
-
-	// ToPorts is a list of destination ports identified by port number and
-	// protocol which the endpoint subject to the rule is allowed to
-	// receive connections on.
-	//
-	// Example:
-	// Any endpoint with the label "app=httpd" can only accept incoming
-	// connections on port 80/tcp.
-	//
-	// +optional
-	ToPorts []PortRule `json:"toPorts,omitempty"`
-
-	// FromCIDR is a list of IP blocks which the endpoint subject to the
-	// rule is allowed to receive connections from. Only connections which
-	// do *not* originate from the cluster or from the local host are subject
-	// to CIDR rules. In order to allow in-cluster connectivity, use the
-	// FromEndpoints field.  This will match on the source IP address of
-	// incoming connections. Adding  a prefix into FromCIDR or into
-	// FromCIDRSet with no ExcludeCIDRs is  equivalent.  Overlaps are
-	// allowed between FromCIDR and FromCIDRSet.
-	//
-	// Example:
-	// Any endpoint with the label "app=my-legacy-pet" is allowed to receive
-	// connections from 10.3.9.1
-	//
-	// +optional
-	FromCIDR []CIDR `json:"fromCIDR,omitempty"`
-
-	// FromCIDRSet is a list of IP blocks which the endpoint subject to the
-	// rule is allowed to receive connections from in addition to FromEndpoints,
-	// along with a list of subnets contained within their corresponding IP block
-	// from which traffic should not be allowed.
-	// This will match on the source IP address of incoming connections. Adding
-	// a prefix into FromCIDR or into FromCIDRSet with no ExcludeCIDRs is
-	// equivalent. Overlaps are allowed between FromCIDR and FromCIDRSet.
-	//
-	// Example:
-	// Any endpoint with the label "app=my-legacy-pet" is allowed to receive
-	// connections from 10.0.0.0/8 except from IPs in subnet 10.96.0.0/12.
-	//
-	// +optional
-	FromCIDRSet []CIDRRule `json:"fromCIDRSet,omitempty"`
-
-	// FromEntities is a list of special entities which the endpoint subject
-	// to the rule is allowed to receive connections from. Supported entities are
-	// `world` and `host`
-	//
-	// +optional
-	FromEntities []Entity `json:"fromEntities,omitempty"`
+// WithEndpointSelector configures the Rule with the specified selector.
+func (r *Rule) WithEndpointSelector(es EndpointSelector) *Rule {
+	r.EndpointSelector = es
+	return r
 }
 
-// ServiceSelector is a label selector for k8s services
-type ServiceSelector EndpointSelector
-
-// Service wraps around selectors for services
-type Service struct {
-	// K8sServiceSelector selects services by k8s labels and namespace
-	K8sServiceSelector *K8sServiceSelectorNamespace `json:"k8sServiceSelector,omitempty"`
-	// K8sService selects service by name and namespace pair
-	K8sService *K8sServiceNamespace `json:"k8sService,omitempty"`
+// WithIngressRules configures the Rule with the specified rules.
+func (r *Rule) WithIngressRules(rules []IngressRule) *Rule {
+	r.Ingress = rules
+	return r
 }
 
-// K8sServiceNamespace is an abstraction for the k8s service + namespace types.
-type K8sServiceNamespace struct {
-	ServiceName string `json:"serviceName,omitempty"`
-	Namespace   string `json:"namespace,omitempty"`
+// WithEgressRules configures the Rule with the specified rules.
+func (r *Rule) WithEgressRules(rules []EgressRule) *Rule {
+	r.Egress = rules
+	return r
 }
 
-// K8sServiceSelectorNamespace wraps service selector with namespace
-type K8sServiceSelectorNamespace struct {
-	Selector  ServiceSelector `json:"selector"`
-	Namespace string          `json:"namespace,omitempty"`
+// WithLabels configures the Rule with the specified labels metadata.
+func (r *Rule) WithLabels(labels labels.LabelArray) *Rule {
+	r.Labels = labels
+	return r
 }
 
-// EgressRule contains all rule types which can be applied at egress, i.e.
-// network traffic that originates inside the endpoint and exits the endpoint
-// selected by the endpointSelector.
-//
-// - All members of this structure are optional. If omitted or empty, the
-//   member will have no effect on the rule.
-//
-// - For now, combining ToPorts and ToCIDR in the same rule is not supported
-//   and such rules will be rejected. In the future, this will be supported and
-//   if if multiple members of the structure are specified, then all members
-//   must match in order for the rule to take effect.
-type EgressRule struct {
-	// ToPorts is a list of destination ports identified by port number and
-	// protocol which the endpoint subject to the rule is allowed to
-	// connect to.
-	//
-	// Example:
-	// Any endpoint with the label "role=frontend" is allowed to initiate
-	// connections to destination port 8080/tcp
-	//
-	// +optional
-	ToPorts []PortRule `json:"toPorts,omitempty"`
-
-	// ToCIDR is a list of IP blocks which the endpoint subject to the rule
-	// is allowed to initiate connections. Only connections destined for
-	// outside of the cluster and not targetting the host will be subject
-	// to CIDR rules.  This will match on the destination IP address of
-	// outgoing connections. Adding a prefix into ToCIDR or into ToCIDRSet
-	// with no ExcludeCIDRs is equivalent. Overlaps are allowed between
-	// ToCIDR and ToCIDRSet.
-	//
-	// Example:
-	// Any endpoint with the label "app=database-proxy" is allowed to
-	// initiate connections to 10.2.3.0/24
-	//
-	// +optional
-	ToCIDR []CIDR `json:"toCIDR,omitempty"`
-
-	// ToCIDRSet is a list of IP blocks which the endpoint subject to the rule
-	// is allowed to initiate connections to in addition to connections
-	// which are allowed via FromEndpoints, along with a list of subnets contained
-	// within their corresponding IP block to which traffic should not be
-	// allowed. This will match on the destination IP address of outgoing
-	// connections. Adding a prefix into ToCIDR or into ToCIDRSet with no
-	// ExcludeCIDRs is equivalent. Overlaps are allowed between ToCIDR and
-	// ToCIDRSet.
-	//
-	// Example:
-	// Any endpoint with the label "app=database-proxy" is allowed to
-	// initiate connections to 10.2.3.0/24 except from IPs in subnet 10.2.3.0/28.
-	//
-	// +optional
-	ToCIDRSet []CIDRRule `json:"toCIDRSet,omitempty"`
-
-	// ToEntities is a list of special entities to which the endpoint subject
-	// to the rule is allowed to initiate connections. Supported entities are
-	// `world` and `host`
-	//
-	// +optional
-	ToEntities []Entity `json:"toEntities,omitempty"`
-
-	// ToServices is a list of services to which the endpoint subject
-	// to the rule is allowed to initiate connections.
-	//
-	// Example:
-	// Any endpoint with the label "app=backend-app" is allowed to
-	// initiate connections to all cidrs backing the "external-service" service
-	// + optional
-	ToServices []Service `json:"toServices,omitempty"`
+// WithDescription configures the Rule with the specified description metadata.
+func (r *Rule) WithDescription(desc string) *Rule {
+	r.Description = desc
+	return r
 }
 
-// CIDR specifies a block of IP addresses.
-// Example: 192.0.2.1/32
-type CIDR string
-
-// CIDRMatchAll is a []CIDR that matches everything
-var CIDRMatchAll = []CIDR{CIDR("0.0.0.0/0"), CIDR("::/0")}
-
-// L4Proto is a layer 4 protocol name
-type L4Proto string
-
-const (
-	ProtoTCP L4Proto = "TCP"
-	ProtoUDP L4Proto = "UDP"
-	ProtoAny L4Proto = "ANY"
-)
-
-// PortProtocol specifies an L4 port with an optional transport protocol
-type PortProtocol struct {
-	// Port is an L4 port number. For now the string will be strictly
-	// parsed as a single uint16. In the future, this field may support
-	// ranges in the form "1024-2048
-	Port string `json:"port"`
-
-	// Protocol is the L4 protocol. If omitted or empty, any protocol
-	// matches. Accepted values: "TCP", "UDP", ""/"ANY"
-	//
-	// Matching on ICMP is not supported.
-	//
-	// +optional
-	Protocol L4Proto `json:"protocol,omitempty"`
-}
-
-// PortRule is a list of ports/protocol combinations with optional Layer 7
-// rules which must be met.
-type PortRule struct {
-	// Ports is a list of L4 port/protocol
-	//
-	// If omitted or empty but RedirectPort is set, then all ports of the
-	// endpoint subject to either the ingress or egress rule are being
-	// redirected.
-	//
-	// +optional
-	Ports []PortProtocol `json:"ports,omitempty"`
-
-	// Rules is a list of additional port level rules which must be met in
-	// order for the PortRule to allow the traffic. If omitted or empty,
-	// no layer 7 rules are enforced.
-	//
-	// +optional
-	Rules *L7Rules `json:"rules,omitempty"`
-}
-
-// CIDRRule is a rule that specifies a CIDR prefix to/from which outside
-// communication  is allowed, along with an optional list of subnets within that
-// CIDR prefix to/from which outside communication is not allowed.
-type CIDRRule struct {
-	// CIDR is a CIDR prefix / IP Block.
-	//
-	Cidr CIDR `json:"cidr"`
-
-	// ExceptCIDRs is a list of IP blocks which the endpoint subject to the rule
-	// is not allowed to initiate connections to. These CIDR prefixes should be
-	// contained within Cidr. These exceptions are only applied to the Cidr in
-	// this CIDRRule, and do not apply to any other CIDR prefixes in any other
-	// CIDRRules.
-	//
-	// +optional
-	ExceptCIDRs []CIDR `json:"except,omitempty"`
-
-	// Generated indicates whether the rule was generated based on other rules
-	// or provided by user
-	Generated bool `json:"-"`
-}
-
-// L7Rules is a union of port level rule types. Mixing of different port
-// level rule types is disallowed, so exactly one of the following must be set.
-// If none are specified, then no additional port level rules are applied.
-type L7Rules struct {
-	// HTTP specific rules.
-	//
-	// +optional
-	HTTP []PortRuleHTTP `json:"http,omitempty"`
-
-	// Kafka-specific rules.
-	//
-	// +optional
-	Kafka []PortRuleKafka `json:"kafka,omitempty"`
-}
-
-// PortRuleHTTP is a list of HTTP protocol constraints. All fields are
-// optional, if all fields are empty or missing, the rule does not have any
-// effect.
-//
-// All fields of this type are extended POSIX regex as defined by IEEE Std
-// 1003.1, (i.e this follows the egrep/unix syntax, not the perl syntax)
-// matched against the path of an incoming request. Currently it can contain
-// characters disallowed from the conventional "path" part of a URL as defined
-// by RFC 3986.
-type PortRuleHTTP struct {
-	// Path is an extended POSIX regex matched against the path of a
-	// request. Currently it can contain characters disallowed from the
-	// conventional "path" part of a URL as defined by RFC 3986.
-	//
-	// If omitted or empty, all paths are all allowed.
-	//
-	// +optional
-	Path string `json:"path,omitempty"`
-
-	// Method is an extended POSIX regex matched against the method of a
-	// request, e.g. "GET", "POST", "PUT", "PATCH", "DELETE", ...
-	//
-	// If omitted or empty, all methods are allowed.
-	//
-	// +optional
-	Method string `json:"method,omitempty"`
-
-	// Host is an extended POSIX regex matched against the host header of a
-	// request, e.g. "foo.com"
-	//
-	// If omitted or empty, the value of the host header is ignored.
-	//
-	// +optional
-	Host string `json:"host,omitempty"`
-
-	// Headers is a list of HTTP headers which must be present in the
-	// request. If omitted or empty, requests are allowed regardless of
-	// headers present.
-	//
-	// +optional
-	Headers []string `json:"headers,omitempty"`
-}
-
-// PortRuleKafka is a list of Kafka protocol constraints. All fields are
-// optional, if all fields are empty or missing, the rule will match all
-// Kafka messages.
-type PortRuleKafka struct {
-	// APIVersion is the version matched against the api version of the
-	// Kafka message. If set, it has to be a string representing a positive
-	// integer.
-	//
-	// If omitted or empty, all versions are allowed.
-	//
-	// +optional
-	APIVersion string `json:"apiVersion,omitempty"`
-
-	// APIKey is a case-insensitive string matched against the key of a
-	// request, e.g. "produce", "fetch", "createtopic", "deletetopic", et al
-	// Reference: https://kafka.apache.org/protocol#protocol_api_keys
-	//
-	// If omitted or empty, all keys are allowed.
-	//
-	// +optional
-	APIKey string `json:"apiKey,omitempty"`
-
-	// ClientID is the client identifier as provided in the request.
-	//
-	// From Kafka protocol documentation:
-	// This is a user supplied identifier for the client application. The
-	// user can use any identifier they like and it will be used when
-	// logging errors, monitoring aggregates, etc. For example, one might
-	// want to monitor not just the requests per second overall, but the
-	// number coming from each client application (each of which could
-	// reside on multiple servers). This id acts as a logical grouping
-	// across all requests from a particular client.
-	//
-	// If omitted or empty, all client identifiers are allowed.
-	//
-	// +optional
-	ClientID string `json:"clientID,omitempty"`
-
-	// Topic is the topic name contained in the message. If a Kafka request
-	// contains multiple topics, then all topics must be allowed or the
-	// message will be rejected.
-	//
-	// This constraint is ignored if the matched request message type
-	// doesn't contain any topic. Maximum size of Topic can be 249
-	// characters as per recent Kafka spec and allowed characters are
-	// a-z, A-Z, 0-9, -, . and _
-	// Older Kafka versions had longer topic lengths of 255, but in Kafka 0.10
-	// version the length was changed from 255 to 249. For compatibility
-	// reasons we are using 255
-	//
-	// If omitted or empty, all topics are allowed.
-	//
-	// +optional
-	Topic string `json:"topic,omitempty"`
-
-	// --------------------------------------------------------------------
-	// Private fields. These fields are used internally and are not exposed
-	// via the API.
-
-	// apiKeyInt is the integer representation of APIKey
-	apiKeyInt *int16
-
-	// apiVersionInt is the integer representation of APIVersion
-	apiVersionInt *int16
-}
-
-// KafkaAPIKeyMap is the map of all allowed kafka API keys
-// with the key values.
-// Reference: https://kafka.apache.org/protocol#protocol_api_keys
-var KafkaAPIKeyMap = map[string]int16{
-	"produce":              0,  /* Produce */
-	"fetch":                1,  /* Fetch */
-	"offsets":              2,  /* Offsets */
-	"metadata":             3,  /* Metadata */
-	"leaderandisr":         4,  /* LeaderAndIsr */
-	"stopreplica":          5,  /* StopReplica */
-	"updatemetadata":       6,  /* UpdateMetadata */
-	"controlledshutdown":   7,  /* ControlledShutdown */
-	"offsetcommit":         8,  /* OffsetCommit */
-	"offsetfetch":          9,  /* OffsetFetch */
-	"findcoordinator":      10, /* FindCoordinator */
-	"joingroup":            11, /* JoinGroup */
-	"heartbeat":            12, /* Heartbeat */
-	"leavegroup":           13, /* LeaveGroup */
-	"syncgroup":            14, /* SyncGroup */
-	"describegroups":       15, /* DescribeGroups */
-	"listgroups":           16, /* ListGroups */
-	"saslhandshake":        17, /* SaslHandshake */
-	"apiversions":          18, /* ApiVersions */
-	"createtopics":         19, /* CreateTopics */
-	"deletetopics":         20, /* DeleteTopics */
-	"deleterecords":        21, /* DeleteRecords */
-	"initproducerid":       22, /* InitProducerId */
-	"offsetforleaderepoch": 23, /* OffsetForLeaderEpoch */
-	"addpartitionstotxn":   24, /* AddPartitionsToTxn */
-	"addoffsetstotxn":      25, /* AddOffsetsToTxn */
-	"endtxn":               26, /* EndTxn */
-	"writetxnmarkers":      27, /* WriteTxnMarkers */
-	"txnoffsetcommit":      28, /* TxnOffsetCommit */
-	"describeacls":         29, /* DescribeAcls */
-	"createacls":           30, /* CreateAcls */
-	"deleteacls":           31, /* DeleteAcls */
-	"describeconfigs":      32, /* DescribeConfigs */
-	"alterconfigs":         33, /* AlterConfigs */
-}
-
-// KafkaReverseApiKeyMap is the map of all allowed kafka API keys
-// with the key values.
-// Reference: https://kafka.apache.org/protocol#protocol_api_keys
-var KafkaReverseAPIKeyMap = map[int16]string{
-	0:  "produce",              /* Produce */
-	1:  "fetch",                /* Fetch */
-	2:  "offsets",              /* Offsets */
-	3:  "metadata",             /* Metadata */
-	4:  "leaderandisr",         /* LeaderAndIsr */
-	5:  "stopreplica",          /* StopReplica */
-	6:  "updatemetadata",       /* UpdateMetadata */
-	7:  "controlledshutdown",   /* ControlledShutdown */
-	8:  "offsetcommit",         /* OffsetCommit */
-	9:  "offsetfetch",          /* OffsetFetch */
-	10: "findcoordinator",      /* FindCoordinator */
-	11: "joingroup",            /* JoinGroup */
-	12: "heartbeat",            /* Heartbeat */
-	13: "leavegroup",           /* LeaveGroup */
-	14: "syncgroup",            /* SyncGroup */
-	15: "describegroups",       /* DescribeGroups */
-	16: "listgroups",           /* ListGroups */
-	17: "saslhandshake",        /* SaslHandshake */
-	18: "apiversions",          /* ApiVersions */
-	19: "createtopics",         /* CreateTopics */
-	20: "deletetopics",         /* DeleteTopics */
-	21: "deleterecords",        /* DeleteRecords */
-	22: "initproducerid",       /* InitProducerId */
-	23: "offsetforleaderepoch", /* OffsetForLeaderEpoch */
-	24: "addpartitionstotxn",   /* AddPartitionsToTxn */
-	25: "addoffsetstotxn",      /* AddOffsetsToTxn */
-	26: "endtxn",               /* EndTxn */
-	27: "writetxnmarkers",      /* WriteTxnMarkers */
-	28: "txnoffsetcommit",      /* TxnOffsetCommit */
-	29: "describeacls",         /* DescribeAcls */
-	30: "createacls",           /* CreateAcls */
-	31: "deleteacls",           /* DeleteAcls */
-	32: "describeconfigs",      /* DescribeConfigs */
-	33: "alterconfigs",         /* AlterConfigs */
-}
-
-// KafkaMaxTopicLen is the maximum character len of a topic.
-// Older Kafka versions had longer topic lengths of 255, in Kafka 0.10 version
-// the length was changed from 255 to 249. For compatibility reasons we are
-// using 255
-const (
-	KafkaMaxTopicLen = 255
-)
-
-// KafkaMaxTopicVal is the maximum value of supported API Keys in KafkaAPIKeyMap
-// KafkaReverseAPIKeyMap
-const (
-	KafkaMaxAPIKeyVal = 33
-)
-
-// KafkaTopicValidChar is a one-time regex generation of all allowed characters
-// in kafka topic name.
-var KafkaTopicValidChar = regexp.MustCompile(`^[a-zA-Z0-9\\._\\-]+$`)
-
-// GetAPIKey returns the APIKey as integer or the bool set to true if any API
-// key is allowed
-func (kr *PortRuleKafka) GetAPIKey() (int16, bool) {
-	if kr.apiKeyInt == nil {
-		return 0, true
+// RequiresDerivative it return true if the rule has a derivative rule.
+func (r *Rule) RequiresDerivative() bool {
+	for _, rule := range r.Egress {
+		if rule.RequiresDerivative() {
+			return true
+		}
 	}
-
-	return *kr.apiKeyInt, false
+	return false
 }
 
-// GetAPIVersion returns the APIVersion as integer or the bool set to true if
-// any API version is allowed
-func (kr *PortRuleKafka) GetAPIVersion() (int16, bool) {
-	if kr.apiVersionInt == nil {
-		return 0, true
-	}
+// CreateDerivative will return a new Rule with the new data based gather
+// by the rules that autogenerated new Rule
+func (r *Rule) CreateDerivative() (*Rule, error) {
+	newRule := r.DeepCopy()
+	newRule.Egress = []EgressRule{}
 
-	return *kr.apiVersionInt, false
+	for _, egressRule := range r.Egress {
+		derivativeEgressRule, err := egressRule.CreateDerivative()
+		if err != nil {
+			return newRule, err
+		}
+		newRule.Egress = append(newRule.Egress, *derivativeEgressRule)
+	}
+	return newRule, nil
 }

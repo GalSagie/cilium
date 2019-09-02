@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,87 +15,132 @@
 package main
 
 import (
-	"net"
-	"os"
-	"runtime"
+	"fmt"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/daemon/options"
-	"github.com/cilium/cilium/pkg/lock"
+	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
+	"github.com/cilium/cilium/pkg/api"
+	"github.com/cilium/cilium/pkg/k8s"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy"
+	"github.com/go-openapi/runtime/middleware"
 )
 
-const (
-	// AllowLocalhostAuto defaults to policy except when running in
-	// Kubernetes where it then defaults to "always"
-	AllowLocalhostAuto = "auto"
-
-	// AllowLocalhostAlways always allows the local stack to reach local
-	// endpoints
-	AllowLocalhostAlways = "always"
-
-	// AllowLocalhostPolicy requires a policy rule to allow the local stack
-	// to reach particular endpoints or policy enforcement must be
-	// disabled.
-	AllowLocalhostPolicy = "policy"
-
-	// ModePreFilterNative for loading progs with xdpdrv
-	ModePreFilterNative = "native"
-
-	// ModePreFilterGeneric for loading progs with xdpgeneric
-	ModePreFilterGeneric = "generic"
-)
-
-// Config is the configuration used by Daemon.
-type Config struct {
-	BpfDir          string     // BPF template files directory
-	LibDir          string     // Cilium library files directory
-	RunDir          string     // Cilium runtime directory
-	NAT46Prefix     *net.IPNet // NAT46 IPv6 Prefix
-	Device          string     // Receive device
-	DevicePreFilter string     // XDP device
-	ModePreFilter   string     // XDP mode, values: { native | generic }
-	HostV4Addr      net.IP     // Host v4 address of the snooping device
-	HostV6Addr      net.IP     // Host v6 address of the snooping device
-	IPv4Disabled    bool       // Disable IPv4 allocation
-	LBInterface     string     // Set with name of the interface to loadbalance packets from
-
-	Tunnel string // Tunnel mode
-
-	DryMode       bool // Do not create BPF maps, devices, ..
-	RestoreState  bool // RestoreState restores the state from previous running daemons.
-	KeepConfig    bool // Keep configuration of existing endpoints when starting up.
-	KeepTemplates bool // Do not overwrite the template files
-
-	// AllowLocalhost defines when to allows the local stack to local endpoints
-	// values: { auto | always | policy }
-	AllowLocalhost string
-
-	// alwaysAllowLocalhost is set based on the value of AllowLocalhost and
-	// is either set to true when localhost can always reach local
-	// endpoints or false when policy should be evaluated
-	alwaysAllowLocalhost bool
-
-	// StateDir is the directory where runtime state of endpoints is stored
-	StateDir string
-
-	// Options changeable at runtime
-	Opts *option.BoolOptions
-
-	// Mutex for serializing configuration updates to the daemon.
-	ConfigPatchMutex lock.RWMutex
-
-	// Monitor contains the configuration for the node monitor.
-	Monitor *models.MonitorStatus
+type patchConfig struct {
+	daemon *Daemon
 }
 
-func NewConfig() *Config {
-	return &Config{
-		Opts:    option.NewBoolOptions(&options.Library),
-		Monitor: &models.MonitorStatus{Cpus: int64(runtime.NumCPU()), Npages: 64, Pagesize: int64(os.Getpagesize()), Lost: 0, Unknown: 0},
+func NewPatchConfigHandler(d *Daemon) PatchConfigHandler {
+	return &patchConfig{daemon: d}
+}
+
+func (h *patchConfig) Handle(params PatchConfigParams) middleware.Responder {
+	log.WithField(logfields.Params, logfields.Repr(params)).Debug("PATCH /config request")
+
+	d := h.daemon
+
+	cfgSpec := params.Configuration
+
+	om, err := option.Config.Opts.Library.ValidateConfigurationMap(cfgSpec.Options)
+	if err != nil {
+		msg := fmt.Errorf("Invalid configuration option %s", err)
+		return api.Error(PatchConfigBadRequestCode, msg)
 	}
+
+	// Serialize configuration updates to the daemon.
+	option.Config.ConfigPatchMutex.Lock()
+
+	// Track changes to daemon's configuration
+	var changes int
+
+	// Only update if value provided for PolicyEnforcement.
+	if enforcement := cfgSpec.PolicyEnforcement; enforcement != "" {
+		switch enforcement {
+		case option.NeverEnforce, option.DefaultEnforcement, option.AlwaysEnforce:
+			// Update policy enforcement configuration if needed.
+			oldEnforcementValue := policy.GetPolicyEnabled()
+
+			// If the policy enforcement configuration has indeed changed, we have
+			// to regenerate endpoints and update daemon's configuration.
+			if enforcement != oldEnforcementValue {
+				log.Debug("configuration request to change PolicyEnforcement for daemon")
+				changes++
+				policy.SetPolicyEnabled(enforcement)
+			}
+
+		default:
+			msg := fmt.Errorf("Invalid option for PolicyEnforcement %s", enforcement)
+			log.Warn(msg)
+			option.Config.ConfigPatchMutex.Unlock()
+			return api.Error(PatchConfigFailureCode, msg)
+		}
+		log.Debug("finished configuring PolicyEnforcement for daemon")
+	}
+
+	changes += option.Config.Opts.ApplyValidated(om, changedOption, d)
+
+	log.WithField("count", changes).Debug("Applied changes to daemon's configuration")
+	option.Config.ConfigPatchMutex.Unlock()
+
+	if changes > 0 {
+		// Only recompile if configuration has changed.
+		log.Debug("daemon configuration has changed; recompiling base programs")
+		if err := d.compileBase(); err != nil {
+			msg := fmt.Errorf("Unable to recompile base programs: %s", err)
+			return api.Error(PatchConfigFailureCode, msg)
+		}
+		d.TriggerPolicyUpdates(true, "agent configuration update")
+	}
+
+	return NewPatchConfigOK()
 }
 
-func (c *Config) IsLBEnabled() bool {
-	return c.LBInterface != ""
+type getConfig struct {
+	daemon *Daemon
+}
+
+func NewGetConfigHandler(d *Daemon) GetConfigHandler {
+	return &getConfig{daemon: d}
+}
+
+func (h *getConfig) Handle(params GetConfigParams) middleware.Responder {
+	log.WithField(logfields.Params, logfields.Repr(params)).Debug("GET /config request")
+
+	d := h.daemon
+
+	spec := &models.DaemonConfigurationSpec{
+		Options:           *option.Config.Opts.GetMutableModel(),
+		PolicyEnforcement: policy.GetPolicyEnabled(),
+	}
+
+	monitorState := d.monitorAgent.State()
+	status := &models.DaemonConfigurationStatus{
+		Addressing:       node.GetNodeAddressing(),
+		K8sConfiguration: k8s.GetKubeconfigPath(),
+		K8sEndpoint:      k8s.GetAPIServer(),
+		NodeMonitor:      &monitorState,
+		KvstoreConfiguration: &models.KVstoreConfiguration{
+			Type:    option.Config.KVStore,
+			Options: option.Config.KVStoreOpt,
+		},
+		Realized:     spec,
+		DeviceMTU:    int64(d.mtuConfig.GetDeviceMTU()),
+		RouteMTU:     int64(d.mtuConfig.GetRouteMTU()),
+		DatapathMode: models.DatapathMode(option.Config.DatapathMode),
+		IpvlanConfiguration: &models.IpvlanConfiguration{
+			MasterDeviceIndex: int64(option.Config.Ipvlan.MasterDeviceIndex),
+			OperationMode:     option.Config.Ipvlan.OperationMode,
+		},
+		IPAMMode:   option.Config.IPAM,
+		Masquerade: option.Config.Masquerade,
+	}
+
+	cfg := &models.DaemonConfiguration{
+		Spec:   spec,
+		Status: status,
+	}
+
+	return NewGetConfigOK().WithPayload(cfg)
 }

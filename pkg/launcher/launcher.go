@@ -22,9 +22,12 @@ import (
 
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+
+	"github.com/sirupsen/logrus"
 )
 
-var log = logging.DefaultLogger
+var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "launcher")
 
 // Launcher is used to wrap the node executable binary.
 type Launcher struct {
@@ -36,33 +39,31 @@ type Launcher struct {
 }
 
 // Run starts the daemon.
-func (launcher *Launcher) Run() {
+func (launcher *Launcher) Run() error {
 	targetName := launcher.GetTarget()
+	cmdStr := fmt.Sprintf("%s %s", targetName, launcher.GetArgs())
 	cmd := exec.Command(targetName, launcher.GetArgs()...)
 	cmd.Stderr = os.Stderr
 	stdout, _ := cmd.StdoutPipe()
 	if err := cmd.Start(); err != nil {
-		cmdStr := fmt.Sprintf("%s %s", targetName, launcher.GetArgs())
 		log.WithError(err).WithField("cmd", cmdStr).Error("cmd.Start()")
+		return fmt.Errorf("unable to launch process %s: %s", cmdStr, err)
 	}
 
 	launcher.setProcess(cmd.Process)
 	launcher.setStdout(stdout)
-}
 
-// Restart stops the launcher which will trigger a rerun.
-func (launcher *Launcher) Restart(args []string) {
-	launcher.Mutex.Lock()
-	defer launcher.Mutex.Unlock()
-	launcher.args = args
+	// Wait for the process to exit in the background to release all
+	// resources
+	go func() {
+		err := cmd.Wait()
+		log.WithFields(logrus.Fields{
+			"exitCode": err,
+			"cmd":      cmdStr,
+		}).Debug("Process exited")
+	}()
 
-	if launcher.process == nil {
-		return
-	}
-	if err := launcher.process.Kill(); err != nil {
-		log.WithError(err).WithField("pid", launcher.process.Pid).Error("process.Kill()")
-	}
-	launcher.process = nil
+	return nil
 }
 
 // SetTarget sets the Launcher target.

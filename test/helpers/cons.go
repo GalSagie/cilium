@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,28 +15,60 @@
 package helpers
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path"
 	"time"
+
+	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
+	"github.com/cilium/cilium/pkg/versioncheck"
+	"github.com/cilium/cilium/test/ginkgo-ext"
 )
 
 var (
 	// HelperTimeout is a predefined timeout value for commands.
-	HelperTimeout time.Duration = 300 // WithTimeout helper translates it to seconds
+	HelperTimeout = 4 * time.Minute
+
+	// ShortCommandTimeout is a timeout for commands which should not take a
+	// long time to execute.
+	ShortCommandTimeout = 10 * time.Second
+
+	// MidCommandTimeout is a timeout for commands which may take a bit longer
+	// than ShortCommandTimeout, but less time than HelperTimeout to execute.
+	MidCommandTimeout = 30 * time.Second
+
+	// CiliumStartTimeout is a predefined timeout value for Cilium startup.
+	CiliumStartTimeout = 100 * time.Second
+
+	// CiliumBasePath is the absolute path to the cilium source repository
+	// in the guest VMs
+	CiliumBasePath = "/home/vagrant/go/src/github.com/cilium/cilium"
+
+	// BasePath is the path in the Vagrant VMs to which the test directory
+	// is mounted
+	BasePath = path.Join(CiliumBasePath, "test")
+
+	// CheckLogs newtes a new buffer where all the warnings and checks that
+	// happens during the test are saved. This buffer will be printed in the
+	// test output inside <checks> labels.
+	CheckLogs = ginkgoext.NewWriter(new(bytes.Buffer))
 )
 
 const (
-	// BasePath is the path in the Vagrant VMs to which the test directory
-	// is mounted
-	BasePath = "/src/test/"
 
-	// ManifestBase tells ginkgo suite where to look for manifests
+	//CiliumPath is the path where cilium test code is located.
+	CiliumPath = "/src/github.com/cilium/cilium/test"
+
+	// K8sManifestBase tells ginkgo suite where to look for manifests
 	K8sManifestBase = "k8sT/manifests"
 
 	// VM / Test suite constants.
 	K8s     = "k8s"
 	K8s1    = "k8s1"
+	K8s1Ip  = "192.168.36.11"
 	K8s2    = "k8s2"
+	K8s2Ip  = "192.168.36.12"
 	Runtime = "runtime"
 
 	Enabled  = "enabled"
@@ -64,19 +96,13 @@ const (
 	// selecting endpoints.
 	PolicyEnforcementNever = "never"
 
-	// Docker Image names
-
 	// CiliumDockerNetwork is the name of the Docker network which Cilium manages.
 	CiliumDockerNetwork = "cilium-net"
 
-	// NetperfImage is the Docker image used for performance testing
-	NetperfImage = "tgraf/netperf"
-
-	// HttpdImage is the image used for starting an HTTP server.
-	HttpdImage = "cilium/demo-httpd"
+	// HostDockerNetwork is the name of the host network driver.
+	HostDockerNetwork = "host"
 
 	// Names of commonly used containers in tests.
-
 	Httpd1 = "httpd1"
 	Httpd2 = "httpd2"
 	Httpd3 = "httpd3"
@@ -120,8 +146,18 @@ const (
 	StateTerminating = "Terminating"
 	StateRunning     = "Running"
 
-	PingCount          = 5
+	PingCount = 5
+
+	// CurlConnectTimeout is the timeout for the connect() call that curl
+	// invokes
 	CurlConnectTimeout = 5
+
+	// CurlMaxTimeout is the hard timeout. It starts when curl is invoked
+	// and interrupts curl regardless of whether curl is currently
+	// connecting or transferring data. CurlMaxTimeout should be at least 5
+	// seconds longer than CurlConnectTimeout to provide some time to
+	// actually transfer data.
+	CurlMaxTimeout = 8
 
 	DefaultNamespace    = "default"
 	KubeSystemNamespace = "kube-system"
@@ -131,6 +167,7 @@ const (
 	LibDir          = "/var/lib/cilium"
 
 	DaemonName             = "cilium"
+	CiliumBugtool          = "cilium-bugtool"
 	CiliumDockerDaemonName = "cilium-docker"
 	AgentDaemon            = "cilium-agent"
 
@@ -142,19 +179,89 @@ const (
 	KubectlDelete = ResourceLifeCycleAction("delete")
 	KubectlApply  = ResourceLifeCycleAction("apply")
 
-	KubectlPolicyNameLabel      = "io.cilium.k8s-policy-name"
-	KubectlPolicyNameSpaceLabel = "io.cilium.k8s-policy-namespace"
+	KubectlPolicyNameLabel      = k8sConst.PolicyLabelName
+	KubectlPolicyNameSpaceLabel = k8sConst.PolicyLabelNamespace
+
+	CiliumStableVersion      = "v1.5"
+	CiliumStableImageVersion = "cilium/cilium:" + CiliumStableVersion
+	CiliumDeveloperImage     = "k8s1:5000/cilium/cilium-dev:latest"
+
+	MonitorLogFileName = "monitor.log"
+	microscopeManifest = "microscope.yaml"
+
+	// CiliumTestLog is the filename where the cilium logs that happens during
+	// the test are saved.
+	CiliumTestLog = "cilium-test.log"
+
+	// FakeIPv4WorldAddress is an IP which is used in some datapath tests
+	// for simulating external IPv4 connectivity.
+	FakeIPv4WorldAddress = "192.168.254.254"
+
+	// FakeIPv6WorldAddress is an IP which is used in some datapath tests
+	// for simulating external IPv6 connectivity.
+	FakeIPv6WorldAddress = "fdff::ff"
+
+	// DockerBridgeIP is the IP on the docker0 bridge
+	DockerBridgeIP = "172.17.0.1"
+
+	// Logs messages that should not be in the cilium logs.
+	panicMessage      = "panic:"
+	deadLockHeader    = "POTENTIAL DEADLOCK:"       // from github.com/sasha-s/go-deadlock/deadlock.go:header
+	segmentationFault = "segmentation fault"        // from https://github.com/cilium/cilium/issues/3233
+	NACKreceived      = "NACK received for version" // from https://github.com/cilium/cilium/issues/4003
+	RunInitFailed     = "JoinEP: "                  // from https://github.com/cilium/cilium/pull/5052
+	sizeMismatch      = "size mismatch for BPF map" // from https://github.com/cilium/cilium/issues/7851
+
+	// HelmTemplate is the location of the Helm templates to install Cilium
+	HelmTemplate = "go/src/github.com/cilium/cilium/install/kubernetes/cilium"
 )
 
+// Re-definitions of stable constants in the API. The re-definition is on
+// purpose to validate these values in the API. They may never change
+const (
+	// ReservedIdentityHealth is equivalent to pkg/identity.ReservedIdentityHealth
+	ReservedIdentityHealth = 4
+)
+
+// NightlyStableUpgradesFrom the cilium images to update from in Nightly test.
+var NightlyStableUpgradesFrom = []string{"v1.3"}
+
+var (
+	CiliumV1_5 = versioncheck.MustCompile(">=v1.4.90,<v1.6")
+	CiliumV1_6 = versioncheck.MustCompile(">=v1.5.90,<v1.7")
+)
+
+// CiliumDefaultDSPatch is the default Cilium DaemonSet patch to be used in all tests.
+const CiliumDefaultDSPatch = "cilium-ds-patch.yaml"
+
+// CiliumConfigMapPatch is the default Cilium ConfigMap patch to be used in all tests.
+const CiliumConfigMapPatch = "cilium-cm-patch.yaml"
+
+// CiliumConfigMapPatchKvstoreAllocator is equivalent to CiliumConfigMapPatch
+// except it uses the kvstore-based allocator instead of the CRD-based allocator.
+const CiliumConfigMapPatchKvstoreAllocator = "cilium-cm-kvstore-allocator-patch.yaml"
+
+// badLogMessages is a map which key is a part of a log message which indicates
+// a failure if the message does not contain any part from value list.
+var badLogMessages = map[string][]string{
+	panicMessage:      nil,
+	deadLockHeader:    nil,
+	segmentationFault: nil,
+	NACKreceived:      nil,
+	RunInitFailed:     {"signal: terminated", "signal: killed"},
+	sizeMismatch:      nil,
+}
+
 var ciliumCLICommands = map[string]string{
-	"cilium endpoint list -o json":    "endpoint_list.txt",
-	"cilium service list -o json":     "service_list.txt",
-	"cilium config":                   "config.txt",
-	"sudo cilium bpf lb list":         "bpf_lb_list.txt",
-	"sudo cilium bpf ct list global":  "bpf_ct_list.txt",
-	"sudo cilium bpf tunnel list":     "bpf_tunnel_list.txt",
-	"cilium policy get":               "policy_get.txt",
-	"cilium status --all-controllers": "status.txt",
+	"cilium endpoint list -o json":          "endpoint_list.txt",
+	"cilium service list -o json":           "service_list.txt",
+	"cilium config":                         "config.txt",
+	"sudo cilium bpf lb list":               "bpf_lb_list.txt",
+	"sudo cilium bpf ct list global":        "bpf_ct_list.txt",
+	"sudo cilium bpf tunnel list":           "bpf_tunnel_list.txt",
+	"cilium policy get":                     "policy_get.txt",
+	"cilium status --all-controllers":       "status.txt",
+	"cilium kvstore get cilium --recursive": "kvstore_get.txt",
 }
 
 // ciliumKubCLICommands these commands are the same as `ciliumCLICommands` but
@@ -170,9 +277,23 @@ var ciliumKubCLICommands = map[string]string{
 	"cilium status --all-controllers": "status.txt",
 }
 
+// ciliumKubCLICommandsKVStore contains commands related to querying the kvstore.
+// It is separate from ciliumKubCLICommands because it has a higher likelihood
+// of timing out in our CI, so we want to run it separately. Otherwise, we might
+// lose out on getting other critical debugging output when a test fails.
+var ciliumKubCLICommandsKVStore = map[string]string{
+	"cilium kvstore get cilium --recursive": "kvstore_get.txt",
+}
+
+const (
+	ciliumEtcdOperatorSA   = "cilium-etcd-operator-sa.yaml"
+	ciliumEtcdOperatorRBAC = "cilium-etcd-operator-rbac.yaml"
+	ciliumEtcdOperator     = "cilium-etcd-operator.yaml"
+)
+
 //GetFilePath returns the absolute path of the provided filename
 func GetFilePath(filename string) string {
-	return fmt.Sprintf("%s%s", BasePath, filename)
+	return fmt.Sprintf("%s/%s", BasePath, filename)
 }
 
 // K8s1VMName is the name of the Kubernetes master node when running K8s tests.

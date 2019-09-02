@@ -17,9 +17,9 @@ import (
 )
 
 // NewPostIPAMParams creates a new PostIPAMParams object
-// with the default values initialized.
+// no default values defined in spec.
 func NewPostIPAMParams() PostIPAMParams {
-	var ()
+
 	return PostIPAMParams{}
 }
 
@@ -30,18 +30,25 @@ func NewPostIPAMParams() PostIPAMParams {
 type PostIPAMParams struct {
 
 	// HTTP Request Object
-	HTTPRequest *http.Request
+	HTTPRequest *http.Request `json:"-"`
 
 	/*
 	  In: query
 	*/
 	Family *string
+	/*
+	  In: query
+	*/
+	Owner *string
 }
 
 // BindRequest both binds and validates a request, it assumes that complex things implement a Validatable(strfmt.Registry) error interface
-// for simple values it will use straight method calls
+// for simple values it will use straight method calls.
+//
+// To ensure default values, the struct must have been initialized with NewPostIPAMParams() beforehand.
 func (o *PostIPAMParams) BindRequest(r *http.Request, route *middleware.MatchedRoute) error {
 	var res []error
+
 	o.HTTPRequest = r
 
 	qs := runtime.Values(r.URL.Query())
@@ -51,17 +58,26 @@ func (o *PostIPAMParams) BindRequest(r *http.Request, route *middleware.MatchedR
 		res = append(res, err)
 	}
 
+	qOwner, qhkOwner, _ := qs.GetOK("owner")
+	if err := o.bindOwner(qOwner, qhkOwner, route.Formats); err != nil {
+		res = append(res, err)
+	}
+
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
 	return nil
 }
 
+// bindFamily binds and validates parameter Family from query.
 func (o *PostIPAMParams) bindFamily(rawData []string, hasKey bool, formats strfmt.Registry) error {
 	var raw string
 	if len(rawData) > 0 {
 		raw = rawData[len(rawData)-1]
 	}
+
+	// Required: false
+	// AllowEmptyValue: false
 	if raw == "" { // empty values pass all other validations
 		return nil
 	}
@@ -75,11 +91,30 @@ func (o *PostIPAMParams) bindFamily(rawData []string, hasKey bool, formats strfm
 	return nil
 }
 
+// validateFamily carries on validations for parameter Family
 func (o *PostIPAMParams) validateFamily(formats strfmt.Registry) error {
 
 	if err := validate.Enum("family", "query", *o.Family, []interface{}{"ipv4", "ipv6"}); err != nil {
 		return err
 	}
+
+	return nil
+}
+
+// bindOwner binds and validates parameter Owner from query.
+func (o *PostIPAMParams) bindOwner(rawData []string, hasKey bool, formats strfmt.Registry) error {
+	var raw string
+	if len(rawData) > 0 {
+		raw = rawData[len(rawData)-1]
+	}
+
+	// Required: false
+	// AllowEmptyValue: false
+	if raw == "" { // empty values pass all other validations
+		return nil
+	}
+
+	o.Owner = &raw
 
 	return nil
 }

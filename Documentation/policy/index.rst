@@ -1,3 +1,9 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 .. _network_policy:
 .. _Network Policies:
 .. _Network Policy:
@@ -18,8 +24,8 @@ mechanisms:
   responsibility of the user to import the policy in all required agents.
 
 .. versionadded:: future
-   Use of the KVstore to distribute security policies is on the roadmap but has
-   not been implemented yet.
+   Use of the `KVstore to distribute security policies <https://github.com/cilium/cilium/issues/3554>`_
+   is on the roadmap but has not been implemented yet.
 
 .. toctree::
    :maxdepth: 1
@@ -27,4 +33,5 @@ mechanisms:
 
    intro
    language
+   lifecycle
    troubleshooting

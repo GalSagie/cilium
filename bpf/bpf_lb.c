@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2017 Authors of Cilium
+ *  Copyright (C) 2016-2019 Authors of Cilium
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -27,8 +27,6 @@
  *              then passed back to the stack.
  *
  * Configuration:
- *  - LB_DISABLE_IPV4 - Ignore IPv4 packets
- *  - LB_DISABLE_IPV6 - Ignore IPv6 packets
  *  - LB_REDIRECT     - Redirect to an ifindex
  *  - LB_L4           - Enable L4 matching and mapping
  */
@@ -54,15 +52,16 @@
 #include "lib/drop.h"
 #include "lib/lb.h"
 
-#ifndef LB_DISABLE_IPV6
+#ifdef ENABLE_IPV6
 static inline int handle_ipv6(struct __sk_buff *skb)
 {
 	void *data, *data_end;
-	struct lb6_key key = {};
-	struct lb6_service *svc;
+	struct lb6_key_v2 key = {};
+	struct lb6_service_v2 *svc;
+	struct lb6_backend *backend;
 	struct ipv6hdr *ip6;
 	struct csum_offset csum_off = {};
-	int l3_off, l4_off, ret;
+	int l3_off, l4_off, ret, hdrlen;
 	union v6addr new_dst;
 	__u8 nexthdr;
 	__u16 slave;
@@ -75,7 +74,11 @@ static inline int handle_ipv6(struct __sk_buff *skb)
 	nexthdr = ip6->nexthdr;
 	ipv6_addr_copy(&key.address, (union v6addr *) &ip6->daddr);
 	l3_off = ETH_HLEN;
-	l4_off = ETH_HLEN + ipv6_hdrlen(skb, ETH_HLEN, &nexthdr);
+	hdrlen = ipv6_hdrlen(skb, ETH_HLEN, &nexthdr);
+	if (hdrlen < 0)
+		return hdrlen;
+
+	l4_off = ETH_HLEN + hdrlen;
 	csum_l4_offset_and_flags(nexthdr, &csum_off);
 
 #ifdef LB_L4
@@ -89,35 +92,39 @@ static inline int handle_ipv6(struct __sk_buff *skb)
 	}
 #endif
 
-	svc = lb6_lookup_service(skb, &key);
+	svc = lb6_lookup_service_v2(skb, &key);
 	if (svc == NULL) {
 		/* Pass packets to the stack which should not be loadbalanced */
 		return TC_ACT_OK;
 	}
 
-	slave = lb6_select_slave(skb, &key, svc->count, svc->weight);
-	if (!(svc = lb6_lookup_slave(skb, &key, slave)))
+	slave = lb6_select_slave(skb, svc->count, svc->weight);
+	if (!(svc = lb6_lookup_slave_v2(skb, &key, slave)))
+		return DROP_NO_SERVICE;
+	if (!(backend = lb6_lookup_backend(skb, svc->backend_id)))
 		return DROP_NO_SERVICE;
 
-	ipv6_addr_copy(&new_dst, &svc->target);
+	ipv6_addr_copy(&new_dst, &backend->address);
 	if (svc->rev_nat_index)
 		new_dst.p4 |= svc->rev_nat_index;
 
-	ret = lb6_xlate(skb, &new_dst, nexthdr, l3_off, l4_off, &csum_off, &key, svc);
+	ret = lb6_xlate_v2(skb, &new_dst, nexthdr, l3_off, l4_off, &csum_off, &key,
+						svc, backend);
 	if (IS_ERR(ret))
 		return ret;
 
 	return TC_ACT_REDIRECT;
 }
-#endif
+#endif /* ENABLE_IPV6 */
 
-#ifndef LB_DISABLE_IPV4
+#ifdef ENABLE_IPV4
 static inline int handle_ipv4(struct __sk_buff *skb)
 {
 	void *data;
 	void *data_end;
-	struct lb4_key key = {};
-	struct lb4_service *svc;
+	struct lb4_key_v2 key = {};
+	struct lb4_service_v2 *svc;
+	struct lb4_backend *backend;
 	struct iphdr *ip;
 	struct csum_offset csum_off = {};
 	int l3_off, l4_off, ret;
@@ -147,40 +154,48 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 	}
 #endif
 
-	svc = lb4_lookup_service(skb, &key);
+	svc = lb4_lookup_service_v2(skb, &key);
 	if (svc == NULL) {
 		/* Pass packets to the stack which should not be loadbalanced */
 		return TC_ACT_OK;
 	}
 
-	slave = lb4_select_slave(skb, &key, svc->count, svc->weight);
-	if (!(svc = lb4_lookup_slave(skb, &key, slave)))
+	slave = lb4_select_slave(skb, svc->count, svc->weight);
+	if (!(svc = lb4_lookup_slave_v2(skb, &key, slave)))
+		return DROP_NO_SERVICE;
+	if (!(backend = lb4_lookup_backend(skb, svc->backend_id)))
 		return DROP_NO_SERVICE;
 
-	new_dst = svc->target;
-	ret = lb4_xlate(skb, &new_dst, NULL, NULL, nexthdr, l3_off, l4_off, &csum_off, &key, svc);
+	new_dst = backend->address;
+	ret = lb4_xlate_v2(skb, &new_dst, NULL, NULL, nexthdr, l3_off, l4_off,
+						&csum_off, &key, svc, backend);
 	if (IS_ERR(ret))
 		return ret;
 
 	return TC_ACT_REDIRECT;
 }
-#endif
+#endif /* ENABLE_IPV4 */
 
 __section("from-netdev")
 int from_netdev(struct __sk_buff *skb)
 {
+	__u16 proto;
 	int ret;
 
 	bpf_clear_cb(skb);
 
-	switch (skb->protocol) {
-#ifndef LB_DISABLE_IPV6
+	if (!validate_ethertype(skb, &proto))
+		/* Pass unknown traffic to the stack */
+		return TC_ACT_OK;
+
+	switch (proto) {
+#ifdef ENABLE_IPV6
 	case bpf_htons(ETH_P_IPV6):
 		ret = handle_ipv6(skb);
 		break;
 #endif
 
-#ifndef LB_DISABLE_IPV4
+#ifdef ENABLE_IPV4
 	case bpf_htons(ETH_P_IP):
 		ret = handle_ipv4(skb);
 		break;
@@ -192,7 +207,7 @@ int from_netdev(struct __sk_buff *skb)
 	}
 
 	if (IS_ERR(ret))
-		return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
+		return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_INGRESS);
 
 #ifdef LB_REDIRECT
 	if (ret == TC_ACT_REDIRECT) {

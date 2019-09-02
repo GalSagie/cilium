@@ -10,12 +10,15 @@ import (
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime/middleware"
+	"github.com/go-openapi/swag"
+
+	strfmt "github.com/go-openapi/strfmt"
 )
 
 // NewGetHealthzParams creates a new GetHealthzParams object
-// with the default values initialized.
+// no default values defined in spec.
 func NewGetHealthzParams() GetHealthzParams {
-	var ()
+
 	return GetHealthzParams{}
 }
 
@@ -26,17 +29,52 @@ func NewGetHealthzParams() GetHealthzParams {
 type GetHealthzParams struct {
 
 	// HTTP Request Object
-	HTTPRequest *http.Request
+	HTTPRequest *http.Request `json:"-"`
+
+	/*Brief will return a brief representation of the Cilium status.
+
+	  In: header
+	*/
+	Brief *bool
 }
 
 // BindRequest both binds and validates a request, it assumes that complex things implement a Validatable(strfmt.Registry) error interface
-// for simple values it will use straight method calls
+// for simple values it will use straight method calls.
+//
+// To ensure default values, the struct must have been initialized with NewGetHealthzParams() beforehand.
 func (o *GetHealthzParams) BindRequest(r *http.Request, route *middleware.MatchedRoute) error {
 	var res []error
+
 	o.HTTPRequest = r
+
+	if err := o.bindBrief(r.Header[http.CanonicalHeaderKey("brief")], true, route.Formats); err != nil {
+		res = append(res, err)
+	}
 
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+// bindBrief binds and validates parameter Brief from header.
+func (o *GetHealthzParams) bindBrief(rawData []string, hasKey bool, formats strfmt.Registry) error {
+	var raw string
+	if len(rawData) > 0 {
+		raw = rawData[len(rawData)-1]
+	}
+
+	// Required: false
+
+	if raw == "" { // empty values pass all other validations
+		return nil
+	}
+
+	value, err := swag.ConvertBool(raw)
+	if err != nil {
+		return errors.InvalidType("brief", "header", "bool", raw)
+	}
+	o.Brief = &value
+
 	return nil
 }

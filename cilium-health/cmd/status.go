@@ -15,52 +15,21 @@
 package cmd
 
 import (
-	"fmt"
-	"io"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/cilium/cilium/api/v1/health/models"
 	"github.com/cilium/cilium/pkg/command"
+	clientPkg "github.com/cilium/cilium/pkg/health/client"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	probe   bool
-	verbose bool
+	probe    bool
+	succinct bool
+	verbose  bool
 )
-
-func formatConnectivityStatus(w io.Writer, cs *models.ConnectivityStatus, path, indent string) {
-	status := cs.Status
-	if status == "" {
-		latency := time.Duration(cs.Latency)
-		status = fmt.Sprintf("OK, RTT=%s", latency)
-	}
-	fmt.Fprintf(w, "%s%s:\t%s\n", indent, path, status)
-}
-
-func formatPathStatus(w io.Writer, name string, cp *models.PathStatus, indent string) {
-	if cp == nil {
-		if verbose {
-			fmt.Fprintf(w, "%s%s connectivity:\tnil\n", indent, name)
-		}
-		return
-	}
-	fmt.Fprintf(w, "%s%s connectivity to %s:\n", indent, name, cp.IP)
-	indent = fmt.Sprintf("%s  ", indent)
-
-	statuses := map[string]*models.ConnectivityStatus{
-		"ICMP":        cp.Icmp,
-		"HTTP via L3": cp.HTTP,
-	}
-	for name, status := range statuses {
-		if status != nil {
-			formatConnectivityStatus(w, status, name, indent)
-		}
-	}
-}
 
 // statusGetCmd represents the status command
 var statusGetCmd = &cobra.Command{
@@ -69,6 +38,10 @@ var statusGetCmd = &cobra.Command{
 	Short:   "Display cilium connectivity to other nodes",
 	Run: func(cmd *cobra.Command, args []string) {
 		var sr *models.HealthStatusResponse
+
+		if client == nil {
+			Fatalf("Invalid combination of arguments")
+		}
 
 		if probe {
 			result, err := client.Connectivity.PutStatusProbe(nil)
@@ -90,22 +63,7 @@ var statusGetCmd = &cobra.Command{
 			}
 		} else {
 			w := tabwriter.NewWriter(os.Stdout, 2, 0, 3, ' ', 0)
-			fmt.Fprintf(w, "Probe time:\t%s\n", sr.Timestamp)
-			fmt.Fprintf(w, "Nodes:\n")
-			for _, node := range sr.Nodes {
-				localStr := ""
-				if sr.Local != nil && node.Name == sr.Local.Name {
-					localStr = " (localhost)"
-				}
-				fmt.Fprintf(w, "  %s%s:\n", node.Name, localStr)
-				formatPathStatus(w, "Host", node.Host.PrimaryAddress, "    ")
-				if verbose && len(node.Host.SecondaryAddresses) > 0 {
-					for _, addr := range node.Host.SecondaryAddresses {
-						formatPathStatus(w, "Secondary", addr, "      ")
-					}
-				}
-				formatPathStatus(w, "Endpoint", node.Endpoint, "    ")
-			}
+			clientPkg.FormatHealthStatusResponse(w, sr, true, succinct, verbose, 0)
 			w.Flush()
 		}
 	},
@@ -115,7 +73,9 @@ func init() {
 	rootCmd.AddCommand(statusGetCmd)
 	statusGetCmd.Flags().BoolVarP(&probe, "probe", "", false,
 		"Synchronously probe connectivity status")
+	statusGetCmd.Flags().BoolVarP(&succinct, "succinct", "", false,
+		"Print the result succinctly (one node per line)")
 	statusGetCmd.Flags().BoolVarP(&verbose, "verbose", "", false,
-		"Print the result verbosely")
+		"Print more information in results")
 	command.AddJSONOutput(statusGetCmd)
 }

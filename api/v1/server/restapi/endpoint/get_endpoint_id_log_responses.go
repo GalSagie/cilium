@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // GetEndpointIDLogOKCode is the HTTP code returned for type GetEndpointIDLogOK
@@ -30,6 +30,7 @@ type GetEndpointIDLogOK struct {
 
 // NewGetEndpointIDLogOK creates GetEndpointIDLogOK with default headers values
 func NewGetEndpointIDLogOK() *GetEndpointIDLogOK {
+
 	return &GetEndpointIDLogOK{}
 }
 
@@ -50,13 +51,13 @@ func (o *GetEndpointIDLogOK) WriteResponse(rw http.ResponseWriter, producer runt
 	rw.WriteHeader(200)
 	payload := o.Payload
 	if payload == nil {
-		payload = make(models.EndpointStatusLog, 0, 50)
+		// return empty array
+		payload = models.EndpointStatusLog{}
 	}
 
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // GetEndpointIDLogInvalidCode is the HTTP code returned for type GetEndpointIDLogInvalid
@@ -71,11 +72,14 @@ type GetEndpointIDLogInvalid struct {
 
 // NewGetEndpointIDLogInvalid creates GetEndpointIDLogInvalid with default headers values
 func NewGetEndpointIDLogInvalid() *GetEndpointIDLogInvalid {
+
 	return &GetEndpointIDLogInvalid{}
 }
 
 // WriteResponse to the client
 func (o *GetEndpointIDLogInvalid) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(400)
 }
@@ -92,11 +96,14 @@ type GetEndpointIDLogNotFound struct {
 
 // NewGetEndpointIDLogNotFound creates GetEndpointIDLogNotFound with default headers values
 func NewGetEndpointIDLogNotFound() *GetEndpointIDLogNotFound {
+
 	return &GetEndpointIDLogNotFound{}
 }
 
 // WriteResponse to the client
 func (o *GetEndpointIDLogNotFound) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(404)
 }

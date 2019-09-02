@@ -16,6 +16,8 @@ import (
 type PostIPAMIPURL struct {
 	IP string
 
+	Owner *string
+
 	_basePath string
 	// avoid unkeyed usage
 	_ struct{}
@@ -38,7 +40,7 @@ func (o *PostIPAMIPURL) SetBasePath(bp string) {
 
 // Build a url path and query string
 func (o *PostIPAMIPURL) Build() (*url.URL, error) {
-	var result url.URL
+	var _result url.URL
 
 	var _path = "/ipam/{ip}"
 
@@ -46,15 +48,28 @@ func (o *PostIPAMIPURL) Build() (*url.URL, error) {
 	if ip != "" {
 		_path = strings.Replace(_path, "{ip}", ip, -1)
 	} else {
-		return nil, errors.New("IP is required on PostIPAMIPURL")
+		return nil, errors.New("ip is required on PostIPAMIPURL")
 	}
+
 	_basePath := o._basePath
 	if _basePath == "" {
-		_basePath = "/v1beta"
+		_basePath = "/v1"
 	}
-	result.Path = golangswaggerpaths.Join(_basePath, _path)
+	_result.Path = golangswaggerpaths.Join(_basePath, _path)
 
-	return &result, nil
+	qs := make(url.Values)
+
+	var owner string
+	if o.Owner != nil {
+		owner = *o.Owner
+	}
+	if owner != "" {
+		qs.Set("owner", owner)
+	}
+
+	_result.RawQuery = qs.Encode()
+
+	return &_result, nil
 }
 
 // Must is a helper function to panic when the url builder returns an error

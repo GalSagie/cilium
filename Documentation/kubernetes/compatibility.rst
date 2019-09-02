@@ -1,3 +1,9 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 :orphan:
 
 .. _k8scompatibility:
@@ -5,23 +11,16 @@
 Kubernetes Compatibility
 ========================
 
-cilium is compatible with multiple kubernetes API Groups. Some are deprecated
-or beta, and may only be available in specific versions of kubernetes.
+Cilium is compatible with multiple Kubernetes API Groups. Some are deprecated
+or beta, and may only be available in specific versions of Kubernetes.
 
-============= =========================== ==========================
- k8s Version   k8s `NetworkPolicy` API      CiliumNetworkPolicy
-============= =========================== ==========================
- <=1.6         * `extensions/v1beta1`_    `ThirdPartyResource`
-------------- --------------------------- --------------------------
- 1.7           * `extensions/v1beta1`_    `CustomResourceDefinition`,
-               * `networking.k8s.io/v1`_  `ThirdPartyResource`
-------------- --------------------------- --------------------------
- 1.8           * `extensions/v1beta1`_    `CustomResourceDefinition`,
-               * `networking.k8s.io/v1`_  `ThirdPartyResource`
-------------- --------------------------- --------------------------
- 1.9           * `extensions/v1beta1`_    `CustomResourceDefinition`,
-               * `networking.k8s.io/v1`_  `ThirdPartyResource`
-============= =========================== ==========================
+All Kubernetes versions listed are compatible with Cilium:
 
-.. _extensions/v1beta1: https://kubernetes.io/docs/api-reference/extensions/v1beta1/definitions/#_v1beta1_networkpolicy
++----------------------------------------+---------------------------+----------------------------+
+| k8s Version                            | k8s NetworkPolicy API     | CiliumNetworkPolicy        |
++----------------------------------------+---------------------------+----------------------------+
+|                                        |                           | ``cilium.io/v2`` has a     |
+| 1.10, 1.11, 1.12, 1.13, 1.14, 1.15     | * `networking.k8s.io/v1`_ | `CustomResourceDefinition` |
++----------------------------------------+---------------------------+----------------------------+
+
 .. _networking.k8s.io/v1: https://kubernetes.io/docs/api-reference/v1.8/#networkpolicy-v1-networking

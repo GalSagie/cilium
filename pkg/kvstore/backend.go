@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,10 +15,10 @@
 package kvstore
 
 import (
-	"encoding/json"
+	"context"
 	"time"
 
-	"github.com/cilium/cilium/common/types"
+	"google.golang.org/grpc"
 )
 
 type backendOption struct {
@@ -34,9 +34,40 @@ type backendOption struct {
 
 type backendOptions map[string]*backendOption
 
-// backendBase is the base type to be embedded by all backends
-type backendBase struct {
-	opts backendOptions
+// ExtraOptions represents any options that can not be represented in a textual
+// format and need to be set programmatically.
+type ExtraOptions struct {
+	DialOption []grpc.DialOption
+
+	// ClusterSizeDependantInterval defines the function to calculate
+	// intervals based on cluster size
+	ClusterSizeDependantInterval func(baseInterval time.Duration) time.Duration
+}
+
+// StatusCheckInterval returns the interval of status checks depending on the
+// cluster size and the current connectivity state
+//
+// nodes      OK  Failing
+// 1         20s       3s
+// 4         45s       7s
+// 8       1m05s      11s
+// 32      1m45s      18s
+// 128     2m25s      24s
+// 512     3m07s      32s
+// 2048    3m46s      38s
+// 8192    4m30s      45s
+func (e *ExtraOptions) StatusCheckInterval(allConnected bool) time.Duration {
+	interval := 30 * time.Second
+
+	// Reduce the interval while connectivity issues are being detected
+	if !allConnected {
+		interval = 5 * time.Second
+	}
+
+	if e != nil && e.ClusterSizeDependantInterval != nil {
+		interval = e.ClusterSizeDependantInterval(interval)
+	}
+	return interval
 }
 
 // backendModule is the interface that each kvstore backend has to implement.
@@ -48,6 +79,10 @@ type backendModule interface {
 	// This function is called once before newClient().
 	setConfig(opts map[string]string) error
 
+	// setExtraConfig sets more options in the kvstore that are not able to
+	// be set by strings.
+	setExtraConfig(opts *ExtraOptions) error
+
 	// setConfigDummy must configure the backend with dummy configuration
 	// for testing purposes. This is a replacement for setConfig().
 	setConfigDummy()
@@ -57,7 +92,10 @@ type backendModule interface {
 
 	// newClient must initializes the backend and create a new kvstore
 	// client which implements the BackendOperations interface
-	newClient() (BackendOperations, error)
+	newClient(opts *ExtraOptions) (BackendOperations, chan error)
+
+	// createInstance creates a new instance of the module
+	createInstance() backendModule
 }
 
 var (
@@ -78,7 +116,7 @@ func registerBackend(name string, module backendModule) {
 // getBackend finds a registered backend by name
 func getBackend(name string) backendModule {
 	if backend, ok := registeredBackends[name]; ok {
-		return backend
+		return backend.createInstance()
 	}
 
 	return nil
@@ -88,31 +126,32 @@ func getBackend(name string) backendModule {
 // must implement. Direct use of this interface is possible but will bypass the
 // tracing layer.
 type BackendOperations interface {
-	// BEGIN Obsolete API
-	//
-	// These functions have been obsoleted but are still in use. They will
-	// get obsoleted over the course of the next couple of releases.
-	GetValue(k string) (json.RawMessage, error)          // Use Get() instead
-	SetValue(k string, v interface{}) error              // Use Set() instead
-	InitializeFreeID(path string, firstID uint32) error  // Do not use anymore
-	GetMaxID(key string, firstID uint32) (uint32, error) // Do not use anymore
-	SetMaxID(key string, firstID, maxID uint32) error    // Do not use anymore
+	// Connected returns a channel which is closed whenever the kvstore client
+	// is connected to the kvstore server. (Only implemented for etcd)
+	Connected() <-chan struct{}
 
-	GASNewL3n4AddrID(basePath string, baseID uint32, lAddrID *types.L3n4AddrID) error // Do not use anymore
-	// END Obsolete API
+	// Disconnected returns a channel which is closed whenever the kvstore
+	// client is not connected to the kvstore server. (Only implemented for etcd)
+	Disconnected() <-chan struct{}
 
-	// Status returns the status of he kvstore client including an
+	// Status returns the status of the kvstore client including an
 	// eventual error
 	Status() (string, error)
 
 	// LockPath locks the provided path
-	LockPath(path string) (kvLocker, error)
+	LockPath(ctx context.Context, path string) (KVLocker, error)
 
 	// Get returns value of key
 	Get(key string) ([]byte, error)
 
-	// GetPrefix returns the first key which matches the prefix
-	GetPrefix(prefix string) ([]byte, error)
+	// GetIfLocked returns value of key if the client is still holding the given lock.
+	GetIfLocked(key string, lock KVLocker) ([]byte, error)
+
+	// GetPrefix returns the first key which matches the prefix and its value
+	GetPrefix(ctx context.Context, prefix string) (string, []byte, error)
+
+	// GetPrefixIfLocked returns the first key which matches the prefix and its value if the client is still holding the given lock.
+	GetPrefixIfLocked(ctx context.Context, prefix string, lock KVLocker) (string, []byte, error)
 
 	// Set sets value of key
 	Set(key string, value []byte) error
@@ -120,13 +159,28 @@ type BackendOperations interface {
 	// Delete deletes a key
 	Delete(key string) error
 
+	// DeleteIfLocked deletes a key if the client is still holding the given lock.
+	DeleteIfLocked(key string, lock KVLocker) error
+
 	DeletePrefix(path string) error
 
 	// Update atomically creates a key or fails if it already exists
-	Update(key string, value []byte, lease bool) error
+	Update(ctx context.Context, key string, value []byte, lease bool) error
+
+	// UpdateIfLocked atomically creates a key or fails if it already exists if the client is still holding the given lock.
+	UpdateIfLocked(ctx context.Context, key string, value []byte, lease bool, lock KVLocker) error
+
+	// UpdateIfDifferent updates a key if the value is different
+	UpdateIfDifferent(ctx context.Context, key string, value []byte, lease bool) (bool, error)
+
+	// UpdateIfDifferentIfLocked updates a key if the value is different and if the client is still holding the given lock.
+	UpdateIfDifferentIfLocked(ctx context.Context, key string, value []byte, lease bool, lock KVLocker) (bool, error)
 
 	// CreateOnly atomically creates a key or fails if it already exists
-	CreateOnly(key string, value []byte, lease bool) error
+	CreateOnly(ctx context.Context, key string, value []byte, lease bool) (bool, error)
+
+	// CreateOnlyIfLocked atomically creates a key if the client is still holding the given lock or fails if it already exists
+	CreateOnlyIfLocked(ctx context.Context, key string, value []byte, lease bool, lock KVLocker) (bool, error)
 
 	// CreateIfExists creates a key with the value only if key condKey exists
 	CreateIfExists(condKey, key string, value []byte, lease bool) error
@@ -134,23 +188,16 @@ type BackendOperations interface {
 	// ListPrefix returns a list of keys matching the prefix
 	ListPrefix(prefix string) (KeyValuePairs, error)
 
+	// ListPrefixIfLocked returns a list of keys matching the prefix only if the client is still holding the given lock.
+	ListPrefixIfLocked(prefix string, lock KVLocker) (KeyValuePairs, error)
+
 	// Watch starts watching for changes in a prefix. If list is true, the
 	// current keys matching the prefix will be listed and reported as new
 	// keys first.
 	Watch(w *Watcher)
 
-	// CreateLease creates a lease with the specified ttl
-	CreateLease(ttl time.Duration) (interface{}, error)
-
-	// KeepAlive keeps a lease previously created with CreateLease alive
-	// for the duration specified at CreateLease time
-	KeepAlive(lease interface{}) error
-
-	// DeleteLease deletes a lease
-	DeleteLease(interface{}) error
-
-	// close closes the kvstore client
-	closeClient()
+	// Close closes the kvstore client
+	Close()
 
 	// GetCapabilities returns the capabilities of the backend
 	GetCapabilities() Capabilities
@@ -161,4 +208,12 @@ type BackendOperations interface {
 
 	// Decodes a key previously encoded back into the original binary slice
 	Decode(in string) ([]byte, error)
+
+	// ListAndWatch creates a new watcher which will watch the specified
+	// prefix for changes. Before doing this, it will list the current keys
+	// matching the prefix and report them as new keys. Name can be set to
+	// anything and is used for logging messages. The Events channel is
+	// created with the specified sizes. Upon every change observed, a
+	// KeyValueEvent will be sent to the Events channel
+	ListAndWatch(name, prefix string, chanSize int) *Watcher
 }

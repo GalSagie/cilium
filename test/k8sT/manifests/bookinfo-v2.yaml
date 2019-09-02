@@ -39,10 +39,12 @@ spec:
       labels:
         app: ratings
         version: v1
+        zgroup: bookinfo
     spec:
+      terminationGracePeriodSeconds: 0
       containers:
       - name: ratings
-        image: istio/examples-bookinfo-ratings-v1
+        image: docker.io/istio/examples-bookinfo-ratings-v1:1.6.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9080
@@ -61,10 +63,12 @@ spec:
       labels:
         app: reviews
         version: v2
+        zgroup: bookinfo
     spec:
+      terminationGracePeriodSeconds: 0
       containers:
       - name: reviews
-        image: istio/examples-bookinfo-reviews-v2
+        image: docker.io/istio/examples-bookinfo-reviews-v2:1.6.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9080

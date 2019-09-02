@@ -15,18 +15,23 @@
 package helpers
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/cilium/cilium/test/config"
+	ginkgoext "github.com/cilium/cilium/test/ginkgo-ext"
+
 	"github.com/onsi/ginkgo"
 	"github.com/sirupsen/logrus"
 )
 
-//Create a new vagrant server. Receives and scope that it's the target server that need to be created.
-// In case of any error on vagrant [provision|up|ssh-config] error will be returned.
+// CreateVM creates a new vagrant server.Receives a scope which indicates the
+// target server that needs to be created. In case of any error on vagrant
+// [provision|up|ssh-config] error will be returned.
 func CreateVM(scope string) error {
 	createCMD := "vagrant up %s --provision"
 
@@ -37,7 +42,7 @@ func CreateVM(scope string) error {
 		case "not_created":
 			createCMD = "vagrant up %s --provision"
 		default:
-			//Sometimes server are stoped and not destroyed. DestroyVM just in case
+			// Sometimes servers are stoped and not destroyed. Destroy VM just in case
 			DestroyVM(scope)
 		}
 	}
@@ -53,8 +58,10 @@ func CreateVM(scope string) error {
 		return fmt.Errorf("error getting stderr: %s", err)
 	}
 
-	go io.Copy(ginkgo.GinkgoWriter, stderr)
-	go io.Copy(ginkgo.GinkgoWriter, stdout)
+	globalWriter := ginkgoext.NewWriter(ginkgo.GinkgoWriter)
+
+	go io.Copy(globalWriter, stderr)
+	go io.Copy(globalWriter, stdout)
 
 	if err := cmd.Start(); err != nil {
 		log.WithFields(logrus.Fields{
@@ -63,24 +70,40 @@ func CreateVM(scope string) error {
 		}).Fatalf("Create error on start")
 		return err
 	}
-
-	if err := cmd.Wait(); err != nil {
-		return err
-	}
-
-	return nil
+	result := cmd.Wait()
+	io.Copy(ginkgoext.GinkgoWriter, globalWriter.Buffer)
+	return result
 }
 
 // GetVagrantSSHMetadata returns a string containing the output of `vagrant ssh-config`
 // for the provided Vagrant of name vmName. Returns an error if
 // `vagrant ssh-config` fails to execute.
 func GetVagrantSSHMetadata(vmName string) ([]byte, error) {
+	// debugVMs is used when ssh-config returns error and be able to debug the
+	// virtual machines status.
+	debugVms := func() {
+		cmd := getCmd("vagrant status --machine-readable")
+		output, _ := cmd.CombinedOutput()
+		fmt.Fprintf(&config.TestLogWriter, "Vagrant status on failure:\n%s\n", output)
+	}
+
+	var stdout, stderr bytes.Buffer
 	cmd := getCmd(fmt.Sprintf("vagrant ssh-config %s", vmName))
-	result, err := cmd.Output()
+	if config.CiliumTestConfig.SSHConfig != "" {
+		cmd = getCmd(config.CiliumTestConfig.SSHConfig)
+		debugVms = func() {} // not apply the debug helper due is a dev env.
+	}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
 	if err != nil {
+		fmt.Fprintf(&config.TestLogWriter, "cmd='%s %s'\noutput:\n%s\nstderr:\n%s\n",
+			cmd.Path, strings.Join(cmd.Args, " "), stdout.String(), stderr.String())
+		debugVms()
 		return nil, err
 	}
-	return result, nil
+	return stdout.Bytes(), nil
 }
 
 //DestroyVM destroys all running Vagrant VMs in the provided scope. It returns an

@@ -6,32 +6,29 @@ Display local cilium agent status
 
 ### Synopsis
 
-
 Display local cilium agent status
 
 ```
-cilium-health get
+cilium-health get [flags]
 ```
 
 ### Options
 
 ```
+  -h, --help            help for get
   -o, --output string   json| jsonpath='{}'
 ```
 
 ### Options inherited from parent commands
 
 ```
-      --admin string     Expose resources over 'unix' socket, 'any' socket (default "any")
-  -c, --cilium string    URI to Cilium server API
-  -d, --daemon           Run as a daemon
-  -D, --debug            Enable debug messages
-  -H, --host string      URI to cilium-health server API
-  -i, --interval int     Interval (in seconds) for periodic connectivity probes (default 60)
-  -p, --passive          Only respond to HTTP health checks
-      --pidfile string   Write the PID to the specified file
+  -D, --debug                Enable debug messages
+  -H, --host string          URI to cilium-health server API
+      --log-driver strings   Logging endpoints to use for example syslog
+      --log-opt map          Log driver options for cilium-health (default map[])
 ```
 
 ### SEE ALSO
-* [cilium-health](cilium-health.html)	 - Cilium Health Agent
+
+* [cilium-health](cilium-health.html)	 - Cilium Health Client
 

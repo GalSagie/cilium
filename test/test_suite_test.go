@@ -1,4 +1,4 @@
-// Copyright 2017 Authors of Cilium
+// Copyright 2017-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,31 +16,33 @@ package ciliumTest
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/test/config"
+	. "github.com/cilium/cilium/test/ginkgo-ext"
 	ginkgoext "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
-
-	"github.com/cilium/cilium/test/config"
 	gops "github.com/google/gops/agent"
-	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo"
 	ginkgoconfig "github.com/onsi/ginkgo/config"
-	"github.com/onsi/ginkgo/reporters"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/format"
 	"github.com/sirupsen/logrus"
 )
 
 var (
 	log             = logging.DefaultLogger
 	DefaultSettings = map[string]string{
-		"K8S_VERSION": "1.8",
+		"K8S_VERSION": "1.15",
 	}
-	k8sNodesEnv = "K8S_NODES"
+	k8sNodesEnv         = "K8S_NODES"
+	commandsLogFileName = "cmds.log"
 )
 
 func init() {
@@ -55,10 +57,11 @@ func init() {
 	for k, v := range DefaultSettings {
 		getOrSetEnvVar(k, v)
 	}
-
 	config.CiliumTestConfig.ParseFlags()
 
 	os.RemoveAll(helpers.TestResultsPath)
+
+	format.UseStringerRepresentation = true
 }
 
 func configLogsOutput() {
@@ -67,19 +70,37 @@ func configLogsOutput() {
 	logrus.SetFormatter(&config.Formatter)
 	log.Formatter = &config.Formatter
 	log.Hooks.Add(&config.LogHook{})
+
+	ginkgoext.GinkgoWriter = NewWriter(log.Out)
+}
+
+func ShowCommands() {
+	if !config.CiliumTestConfig.ShowCommands {
+		return
+	}
+
+	helpers.SSHMetaLogs = ginkgoext.NewWriter(os.Stdout)
 }
 
 func TestTest(t *testing.T) {
+	if config.CiliumTestConfig.TestScope != "" {
+		helpers.UserDefinedScope = config.CiliumTestConfig.TestScope
+		fmt.Printf("User specified the scope:  %q\n", config.CiliumTestConfig.TestScope)
+	}
+
 	configLogsOutput()
+	ShowCommands()
+
 	if config.CiliumTestConfig.HoldEnvironment {
 		RegisterFailHandler(helpers.Fail)
 	} else {
 		RegisterFailHandler(Fail)
 	}
-	junitReporter := reporters.NewJUnitReporter(fmt.Sprintf(
-		"%s.xml", ginkgoext.GetScopeWithVersion()))
+	junitReporter := ginkgoext.NewJUnitReporter(fmt.Sprintf(
+		"%s.xml", helpers.GetScopeWithVersion()))
 	RunSpecsWithDefaultAndCustomReporters(
-		t, ginkgoext.GetScopeWithVersion(), []Reporter{junitReporter})
+		t, fmt.Sprintf("Suite-%s", helpers.GetScopeWithVersion()),
+		[]ginkgo.Reporter{junitReporter})
 }
 
 func goReportVagrantStatus() chan bool {
@@ -117,12 +138,50 @@ func goReportVagrantStatus() chan bool {
 	return exit
 }
 
-var _ = BeforeSuite(func() {
+func reportCreateVMFailure(vm string, err error) {
+	failmsg := fmt.Sprintf(`
+        ===================== ERROR - VM PROVISION FAILED =====================
+
+        Unable to provision and start VM %q: %s", vm, err
+
+        =======================================================================
+        `, vm, err)
+	ginkgoext.GinkgoPrint(failmsg)
+	Fail(failmsg)
+}
+
+var _ = BeforeAll(func() {
+	go func() {
+		defer GinkgoRecover()
+		time.Sleep(config.CiliumTestConfig.Timeout)
+		msg := fmt.Sprintf("Test suite timed out after %s", config.CiliumTestConfig.Timeout)
+		By(msg)
+		Fail(msg)
+	}()
+
 	var err error
 
-	if !config.CiliumTestConfig.Reprovision {
-		// The developer has explicitly told us that they don't care
-		// about updating Cilium inside the guest, so skip setup below.
+	logger := log.WithFields(logrus.Fields{"testName": "BeforeAll"})
+	scope, err := helpers.GetScope()
+	if err != nil {
+		Fail(fmt.Sprintf(
+			"Cannot get the scope for running test, please use --cilium.testScope option: %s",
+			err))
+	}
+
+	switch helpers.GetCurrentIntegration() {
+	case helpers.CIIntegrationFlannel:
+		switch helpers.GetCurrentK8SEnv() {
+		case "1.8":
+			log.Infof("Cilium in %q mode is not supported in Kubernets 1.8 due CNI < 0.6.0", helpers.CIIntegrationFlannel)
+			os.Exit(0)
+			return
+		}
+	}
+
+	if config.CiliumTestConfig.SSHConfig != "" {
+		// If we set a different VM that it's not in our test environment
+		// ginkgo cannot provision it, so skip setup below.
 		return
 	}
 
@@ -130,20 +189,31 @@ var _ = BeforeSuite(func() {
 		defer func() { progressChan <- err == nil }()
 	}
 
-	switch ginkgoext.GetScope() {
+	switch scope {
 	case helpers.Runtime:
-		err = helpers.CreateVM(helpers.Runtime)
-		if err != nil {
-			Fail(fmt.Sprintf("error starting VM %q: %s", helpers.Runtime, err))
+		var err error
+
+		// Boot / provision VMs if specified by configuration.
+		if config.CiliumTestConfig.Reprovision {
+			err = helpers.CreateVM(helpers.Runtime)
+			if err != nil {
+				log.WithError(err).Error("Error starting VM")
+				reportCreateVMFailure(helpers.Runtime, err)
+			}
 		}
 
-		vm := helpers.InitRuntimeHelper(helpers.Runtime, log.WithFields(
-			logrus.Fields{"testName": "BeforeSuite"}))
+		vm := helpers.InitRuntimeHelper(helpers.Runtime, logger)
 		err = vm.SetUpCilium()
 
 		if err != nil {
-			Fail(fmt.Sprintf("cilium was unable to be set up correctly: %s", err))
+			// AfterFailed function is not defined in this scope, fired the
+			// ReportFailed manually for this assert to gather cilium logs Fix
+			// #3428
+			vm.ReportFailed()
+			log.WithError(err).Error("Cilium was unable to be set up correctly")
+			reportCreateVMFailure(helpers.Runtime, err)
 		}
+		go vm.PprofReport()
 
 	case helpers.K8s:
 		//FIXME: This should be:
@@ -152,45 +222,65 @@ var _ = BeforeSuite(func() {
 		// Start k8s2
 		// Wait until compilation finished, and pull cilium image on k8s2
 
+		if config.CiliumTestConfig.CiliumImage != "" {
+			os.Setenv("CILIUM_IMAGE", config.CiliumTestConfig.CiliumImage)
+		}
+
+		if config.CiliumTestConfig.CiliumOperatorImage != "" {
+			os.Setenv("CILIUM_OPERATOR_IMAGE", config.CiliumTestConfig.CiliumOperatorImage)
+		}
+
+		if config.CiliumTestConfig.ProvisionK8s == false {
+			os.Setenv("SKIP_K8S_PROVISION", "true")
+		}
+
 		// Name for K8s VMs depends on K8s version that is running.
 
-		err = helpers.CreateVM(helpers.K8s1VMName())
-		if err != nil {
-			Fail(fmt.Sprintf("error starting VM %q: %s", helpers.K8s1VMName(), err))
-		}
-
-		err = helpers.CreateVM(helpers.K8s2VMName())
-
-		if err != nil {
-			Fail(fmt.Sprintf("error starting VM %q: %s", helpers.K8s2VMName(), err))
-		}
-		// For Nightly test we need to have more than two kubernetes nodes. If
-		// the env variable K8S_NODES is present, more nodes will be created.
-		if nodes := os.Getenv(k8sNodesEnv); nodes != "" {
-			nodesInt, err := strconv.Atoi(nodes)
+		// Boot / provision VMs if specified by configuration.
+		if config.CiliumTestConfig.Reprovision {
+			err = helpers.CreateVM(helpers.K8s1VMName())
 			if err != nil {
-				Fail(fmt.Sprintf("%s value is not a number %q", k8sNodesEnv, nodes))
+				reportCreateVMFailure(helpers.K8s1VMName(), err)
 			}
-			for i := 3; i <= nodesInt; i++ {
-				vmName := fmt.Sprintf("%s%d-%s", helpers.K8s, i, helpers.GetCurrentK8SEnv())
-				err = helpers.CreateVM(vmName)
+
+			err = helpers.CreateVM(helpers.K8s2VMName())
+			if err != nil {
+				reportCreateVMFailure(helpers.K8s2VMName(), err)
+			}
+
+			// For Nightly test we need to have more than two kubernetes nodes. If
+			// the env variable K8S_NODES is present, more nodes will be created.
+			if nodes := os.Getenv(k8sNodesEnv); nodes != "" {
+				nodesInt, err := strconv.Atoi(nodes)
 				if err != nil {
-					Fail(fmt.Sprintf("error starting VM %q: %s", vmName, err))
+					Fail(fmt.Sprintf("%s value is not a number %q", k8sNodesEnv, nodes))
+				}
+				for i := 3; i <= nodesInt; i++ {
+					vmName := fmt.Sprintf("%s%d-%s", helpers.K8s, i, helpers.GetCurrentK8SEnv())
+					err = helpers.CreateVM(vmName)
+					if err != nil {
+						reportCreateVMFailure(vmName, err)
+					}
 				}
 			}
 		}
+		kubectl := helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+
+		kubectl.Apply(helpers.GetFilePath("../examples/kubernetes/addons/prometheus/prometheus.yaml"))
+
+		go kubectl.PprofReport()
 	}
 	return
 })
 
 var _ = AfterSuite(func() {
 	if !helpers.IsRunningOnJenkins() {
-		log.Infof("AfterSuite: not running on Jenkins; leaving VMs running for debugging")
+		GinkgoPrint("AfterSuite: not running on Jenkins; leaving VMs running for debugging")
 		return
 	}
-
-	scope := ginkgoext.GetScope()
-	log.Infof("cleaning up VMs started for %s tests", scope)
+	// Errors are not checked here because it should fail on BeforeAll
+	scope, _ := helpers.GetScope()
+	GinkgoPrint("cleaning up VMs started for %s tests", scope)
 	switch scope {
 	case helpers.Runtime:
 		helpers.DestroyVM(helpers.Runtime)
@@ -209,21 +299,50 @@ func getOrSetEnvVar(key, value string) {
 }
 
 var _ = AfterEach(func() {
-	path, err := helpers.ReportDirectory()
 
+	// Send the Checks output to Junit report to be render on Jenkins.
+	defer helpers.CheckLogs.Reset()
+	GinkgoPrint("<Checks>\n%s\n</Checks>\n", helpers.CheckLogs.Buffer.String())
+
+	defer config.TestLogWriterReset()
+	err := helpers.CreateLogFile(config.TestLogFileName, config.TestLogWriter.Bytes())
 	if err != nil {
-		log.WithError(err).Errorf("cannot create ReportDirectory")
+		log.WithError(err).Errorf("cannot create log file '%s'", config.TestLogFileName)
 		return
 	}
 
-	defer config.TestLogWriterReset()
-	filePath := fmt.Sprintf("%s/%s", path, config.TestLogFileName)
-	err = ioutil.WriteFile(
-		filePath,
-		config.TestLogWriter.Bytes(),
-		helpers.LogPerm)
+	defer helpers.SSHMetaLogs.Reset()
+	err = helpers.CreateLogFile(commandsLogFileName, helpers.SSHMetaLogs.Bytes())
 	if err != nil {
-		log.WithError(err).Errorf("cannot create log file '%s'", filePath)
+		log.WithError(err).Errorf("cannot create log file '%s'", commandsLogFileName)
 		return
+	}
+
+	// This piece of code is to enable zip attachments on Junit Output.
+	if ginkgo.CurrentGinkgoTestDescription().Failed && helpers.IsRunningOnJenkins() {
+		// ReportDirectory is already created. No check the error
+		path, _ := helpers.CreateReportDirectory()
+		zipFileName := fmt.Sprintf("%s_%s.zip", helpers.MakeUID(), ginkgoext.GetTestName())
+		zipFilePath := filepath.Join(helpers.TestResultsPath, zipFileName)
+
+		_, err := exec.Command(
+			"/bin/bash", "-c",
+			fmt.Sprintf("zip -qr %s %s", zipFilePath, path)).CombinedOutput()
+		if err != nil {
+			log.WithError(err).Errorf("cannot create zip file '%s'", zipFilePath)
+		}
+
+		ginkgoext.GinkgoPrint("[[ATTACHMENT|%s]]", zipFileName)
+	}
+
+	if !ginkgo.CurrentGinkgoTestDescription().Failed && helpers.IsRunningOnJenkins() {
+		// If the test success delete the monitor.log filename to not store all
+		// the data in Jenkins
+		testPath, err := helpers.CreateReportDirectory()
+		if err != nil {
+			log.WithError(err).Error("cannot retrieve test result path")
+			return
+		}
+		_ = os.Remove(filepath.Join(testPath, helpers.MonitorLogFileName))
 	}
 })

@@ -21,13 +21,14 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cilium/cilium/common"
+	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 var (
-	log                  = logging.DefaultLogger
+	log                  = logging.DefaultLogger.WithField(logfields.LogSubsys, "labels-filter")
 	validLabelPrefixesMU lock.RWMutex
 	validLabelPrefixes   *labelPrefixCfg // Label prefixes used to filter from all labels
 )
@@ -60,7 +61,7 @@ func (p LabelPrefix) String() string {
 
 // matches returns true and the length of the matched section if the label is
 // matched by the LabelPrefix. The Ignore flag has no effect at this point.
-func (p LabelPrefix) matches(l *Label) (bool, int) {
+func (p LabelPrefix) matches(l Label) (bool, int) {
 	if p.Source != "" && p.Source != l.Source {
 		return false, 0
 	}
@@ -84,10 +85,10 @@ func (p LabelPrefix) matches(l *Label) (bool, int) {
 // parseLabelPrefix returns a LabelPrefix created from the string label parameter.
 func parseLabelPrefix(label string) (*LabelPrefix, error) {
 	labelPrefix := LabelPrefix{}
-	t := strings.SplitN(label, ":", 2)
-	if len(t) > 1 {
-		labelPrefix.Source = t[0]
-		labelPrefix.Prefix = t[1]
+	i := strings.IndexByte(label, ':')
+	if i >= 0 {
+		labelPrefix.Source = label[:i]
+		labelPrefix.Prefix = label[i+1:]
 	} else {
 		labelPrefix.Prefix = label
 	}
@@ -99,7 +100,7 @@ func parseLabelPrefix(label string) (*LabelPrefix, error) {
 
 	r, err := regexp.Compile(labelPrefix.Prefix)
 	if err != nil {
-		return nil, fmt.Errorf("Unable to compile regexp: %s", err)
+		return nil, fmt.Errorf("unable to compile regexp: %s", err)
 	}
 	labelPrefix.expr = r
 
@@ -112,7 +113,7 @@ func parseLabelPrefix(label string) (*LabelPrefix, error) {
 func ParseLabelPrefixCfg(prefixes []string, file string) error {
 	cfg, err := readLabelPrefixCfgFrom(file)
 	if err != nil {
-		return fmt.Errorf("Unable to read label prefix file: %s", err)
+		return fmt.Errorf("unable to read label prefix file: %s", err)
 	}
 
 	for _, label := range prefixes {
@@ -158,14 +159,18 @@ func defaultLabelPrefixCfg() *labelPrefixCfg {
 	}
 
 	expressions := []string{
-		K8sNamespaceLabel,                                          // include io.kubernetes.pod.namspace
-		"!io.kubernetes",                                           // ignore all other io.kubernetes labels
-		"!.*kubernetes.io",                                         // ignore all other kubernetes.io labels (annotation.*.k8s.io)
-		"!pod-template-generation",                                 // ignore pod-template-generation
-		"!pod-template-hash",                                       // ignore pod-template-hash
-		"!controller-revision-hash",                                // ignore controller-revision-hash
-		"!annotation." + common.CiliumK8sAnnotationPrefix,          // ignore all cilium annotations
-		"!annotation." + common.CiliumIdentityAnnotationDeprecated, // ignore all cilium annotations
+		k8sConst.PodNamespaceLabel,      // include io.kubernetes.pod.namespace
+		k8sConst.PodNamespaceMetaLabels, // include all namespace labels
+		k8sConst.AppKubernetes,          // include app.kubernetes.io
+		"!io.kubernetes",                // ignore all other io.kubernetes labels
+		"!kubernetes.io",                // ignore all other kubernetes.io labels
+		"!.*beta.kubernetes.io",         // ignore all beta.kubernetes.io labels
+		"!k8s.io",                       // ignore all k8s.io labels
+		"!pod-template-generation",      // ignore pod-template-generation
+		"!pod-template-hash",            // ignore pod-template-hash
+		"!controller-revision-hash",     // ignore controller-revision-hash
+		"!annotation.*",                 // ignore all annotation labels
+		"!etcd_node",                    // ignore etcd_node label
 	}
 
 	for _, e := range expressions {
@@ -216,6 +221,10 @@ func readLabelPrefixCfgFrom(fileName string) (*labelPrefixCfg, error) {
 }
 
 func (cfg *labelPrefixCfg) filterLabels(lbls Labels) (identityLabels, informationLabels Labels) {
+	if lbls == nil {
+		return nil, nil
+	}
+
 	validLabelPrefixesMU.RLock()
 	defer validLabelPrefixesMU.RUnlock()
 
@@ -253,9 +262,9 @@ func (cfg *labelPrefixCfg) filterLabels(lbls Labels) (identityLabels, informatio
 		if (!cfg.whitelist && ignored == 0) || included > ignored {
 			// Just want to make sure we don't have labels deleted in
 			// on side and disappearing in the other side...
-			identityLabels[k] = v.DeepCopy()
+			identityLabels[k] = v
 		} else {
-			informationLabels[k] = v.DeepCopy()
+			informationLabels[k] = v
 		}
 	}
 	return identityLabels, informationLabels

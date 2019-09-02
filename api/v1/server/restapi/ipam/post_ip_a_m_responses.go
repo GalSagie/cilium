@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // PostIPAMCreatedCode is the HTTP code returned for type PostIPAMCreated
@@ -25,22 +25,23 @@ type PostIPAMCreated struct {
 	/*
 	  In: Body
 	*/
-	Payload *models.IPAM `json:"body,omitempty"`
+	Payload *models.IPAMResponse `json:"body,omitempty"`
 }
 
 // NewPostIPAMCreated creates PostIPAMCreated with default headers values
 func NewPostIPAMCreated() *PostIPAMCreated {
+
 	return &PostIPAMCreated{}
 }
 
 // WithPayload adds the payload to the post Ip a m created response
-func (o *PostIPAMCreated) WithPayload(payload *models.IPAM) *PostIPAMCreated {
+func (o *PostIPAMCreated) WithPayload(payload *models.IPAMResponse) *PostIPAMCreated {
 	o.Payload = payload
 	return o
 }
 
 // SetPayload sets the payload to the post Ip a m created response
-func (o *PostIPAMCreated) SetPayload(payload *models.IPAM) {
+func (o *PostIPAMCreated) SetPayload(payload *models.IPAMResponse) {
 	o.Payload = payload
 }
 
@@ -73,6 +74,7 @@ type PostIPAMFailure struct {
 
 // NewPostIPAMFailure creates PostIPAMFailure with default headers values
 func NewPostIPAMFailure() *PostIPAMFailure {
+
 	return &PostIPAMFailure{}
 }
 
@@ -95,5 +97,4 @@ func (o *PostIPAMFailure) WriteResponse(rw http.ResponseWriter, producer runtime
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }

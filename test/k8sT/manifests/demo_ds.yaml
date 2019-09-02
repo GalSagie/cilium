@@ -12,9 +12,15 @@ spec:
     spec:
       containers:
       - name: web
-        image: cilium/demo-httpd
+        image: docker.io/cilium/demo-httpd:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+      terminationGracePeriodSeconds: 0
       tolerations:
       - effect: NoSchedule
         key: node-role.kubernetes.io/master
@@ -33,9 +39,11 @@ spec:
       labels:
         zgroup: testDSClient
     spec:
+      terminationGracePeriodSeconds: 0
       containers:
       - name: web
-        image: cilium/demo-client
+        image: docker.io/cilium/demo-client:latest
+        imagePullPolicy: IfNotPresent
         command: [ "sleep" ]
         args:
           - "1000h"

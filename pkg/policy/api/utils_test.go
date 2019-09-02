@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package api
 
 import (
@@ -58,6 +60,31 @@ func (s *PolicyAPITestSuite) TestKafkaEqual(c *C) {
 
 	rules := L7Rules{
 		Kafka: []PortRuleKafka{rule1, rule2},
+	}
+
+	c.Assert(rule1.Exists(rules), Equals, true)
+	c.Assert(rule2.Exists(rules), Equals, true)
+	c.Assert(rule3.Exists(rules), Equals, false)
+}
+
+func (s *PolicyAPITestSuite) TestL7Equal(c *C) {
+	rule1 := PortRuleL7{"Path": "/foo$", "Method": "GET"}
+	rule2 := PortRuleL7{"Path": "/bar$", "Method": "GET"}
+	rule3 := PortRuleL7{"Path": "/foo$", "Method": "GET", "extra": ""}
+
+	c.Assert(rule1.Equal(rule1), Equals, true)
+	c.Assert(rule2.Equal(rule2), Equals, true)
+	c.Assert(rule3.Equal(rule3), Equals, true)
+	c.Assert(rule1.Equal(rule2), Equals, false)
+	c.Assert(rule2.Equal(rule1), Equals, false)
+	c.Assert(rule1.Equal(rule3), Equals, false)
+	c.Assert(rule3.Equal(rule1), Equals, false)
+	c.Assert(rule2.Equal(rule3), Equals, false)
+	c.Assert(rule3.Equal(rule2), Equals, false)
+
+	rules := L7Rules{
+		L7Proto: "testing",
+		L7:      []PortRuleL7{rule1, rule2},
 	}
 
 	c.Assert(rule1.Exists(rules), Equals, true)

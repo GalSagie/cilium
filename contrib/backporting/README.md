@@ -1,12 +1,12 @@
 Cilium Backporting Scripts
 ==========================
 
-# check-stable - List commits that need stable backporting
+# check-stable - List commits that need backporting
 
-`GITHUB_TOKEN=xxx check-stable`
+`GITHUB_TOKEN=xxx check-stable X.Y`
 
 The `check-stable` script is derived from `relnotes` and scans for PRs which
-have been merged and marked with the label `stable/needs-backporting`. The
+have been merged and marked with the label `needs-backport/X.Y`. The
 script will list those PRs and all non-merge commit ids that were part of the
 merge. There are three columns: first one is the correlated sha of the commit
 from the master branch, second one is the sha of the commit from the pull
@@ -16,8 +16,10 @@ branch is then needed for backporting into downstream with the help of the
 
 ## Example
 
-1. Generate a GitHub developer access token. (User Profile -> Settings ->
-   Developer Settings -> Personal access token -> Generate new token)
+1. Generate a GitHub developer access token.
+   You can access directly from https://github.com/settings/tokens or
+   by open GitHub page and then: User Profile -> Settings ->
+   Developer Settings -> Personal access token -> Generate new token
 
    The access token requires access to `public_repo`.
 
@@ -25,7 +27,7 @@ branch is then needed for backporting into downstream with the help of the
 
 2. Run the script to generate the list of current backporting TODOs:
 
-   `GITHUB_TOKEN=xxx `./check-stable`
+   `GITHUB_TOKEN=xxx `./check-stable 1.0`
 
    The list will be dumped to stdout.
 

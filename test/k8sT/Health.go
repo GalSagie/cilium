@@ -1,4 +1,4 @@
-// Copyright 2018 Authors of Cilium
+// Copyright 2018-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,47 +16,39 @@ package k8sTest
 
 import (
 	"fmt"
-	"sync"
 
+	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
 
-	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
 )
 
-var testName = "K8sValidatedHealthTest"
+var _ = Describe("K8sHealthTest", func() {
 
-var _ = Describe(testName, func() {
+	var (
+		kubectl *helpers.Kubectl
+	)
 
-	var kubectl *helpers.Kubectl
-	var logger *logrus.Entry
-	var once sync.Once
-	initialize := func() {
-		logger = log.WithFields(logrus.Fields{"testName": testName})
-		logger.Info("Starting")
-
+	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
-		path := kubectl.ManifestGet("cilium_ds.yaml")
-		kubectl.Apply(path)
-		_, err := kubectl.WaitforPods(helpers.KubeSystemNamespace, "-l k8s-app=cilium", 600)
-		Expect(err).Should(BeNil())
-	}
+		DeployCiliumAndDNS(kubectl)
+	})
 
-	BeforeEach(func() {
-		once.Do(initialize)
+	AfterFailed(func() {
+		kubectl.CiliumReport(helpers.KubeSystemNamespace,
+			"cilium endpoint list")
+	})
+
+	JustAfterEach(func() {
+		kubectl.ValidateNoErrorsInLogs(CurrentGinkgoTestDescription().Duration)
 	})
 
 	AfterEach(func() {
-		if CurrentGinkgoTestDescription().Failed {
-			ciliumPod, _ := kubectl.GetCiliumPodOnNode("kube-system", "k8s1")
-			kubectl.CiliumReport("kube-system", ciliumPod, []string{
-				"cilium service list",
-				"cilium endpoint list",
-				"cilium policy get"})
-		}
-		err := kubectl.WaitCleanAllTerminatingPods()
-		Expect(err).To(BeNil(), "Terminating containers are not deleted after timeout")
+		ExpectAllPodsTerminated(kubectl)
+	})
+
+	AfterAll(func() {
+		kubectl.CloseSSHClient()
 	})
 
 	getCilium := func(node string) (pod, ip string) {
@@ -73,24 +65,26 @@ var _ = Describe(testName, func() {
 	}
 
 	checkIP := func(pod, ip string) {
-		jsonpath := fmt.Sprintf("{.cluster.nodes[*].primary-address.*}")
-		ciliumCmd := fmt.Sprintf("cilium status -o jsonpath='%s'", jsonpath)
-		status := kubectl.CiliumExec(pod, ciliumCmd)
-		Expect(status.Output().String()).Should(ContainSubstring(ip))
-		status.ExpectSuccess()
+		jsonpath := fmt.Sprintf("{.nodes[*].host.primary-address.ip}")
+		ciliumCmd := fmt.Sprintf("cilium-health status -o jsonpath='%s'", jsonpath)
+
+		err := kubectl.CiliumExecUntilMatch(pod, ciliumCmd, ip)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Never saw cilium-health ip %s in pod %s", ip, pod)
 	}
 
 	It("checks cilium-health status between nodes", func() {
+		SkipIfFlannel()
+
 		cilium1, cilium1IP := getCilium(helpers.K8s1)
 		cilium2, cilium2IP := getCilium(helpers.K8s2)
 
-		By(fmt.Sprintf("checking that cilium API exposes health instances"))
+		By("checking that cilium API exposes health instances")
 		checkIP(cilium1, cilium1IP)
 		checkIP(cilium1, cilium2IP)
 		checkIP(cilium2, cilium1IP)
 		checkIP(cilium2, cilium2IP)
 
-		By(fmt.Sprintf("checking that `cilium-health --probe` succeeds"))
+		By("checking that `cilium-health --probe` succeeds")
 		healthCmd := fmt.Sprintf("cilium-health status --probe -o json")
 		status := kubectl.CiliumExec(cilium1, healthCmd)
 		Expect(status.Output()).ShouldNot(ContainSubstring("error"))
@@ -99,17 +93,24 @@ var _ = Describe(testName, func() {
 		apiPaths := []string{
 			"endpoint.icmp",
 			"endpoint.http",
-			"host.\"primary-address\".icmp",
-			"host.\"primary-address\".http",
+			"host.primary-address.icmp",
+			"host.primary-address.http",
 		}
 		for node := 0; node <= 1; node++ {
+			healthCmd := "cilium-health status -o json"
+			status := kubectl.CiliumExec(cilium1, healthCmd)
+			status.ExpectSuccess("Cannot retrieve health status")
 			for _, path := range apiPaths {
-				jqArg := fmt.Sprintf(".nodes[%d].%s.status", node, path)
-				By(fmt.Sprintf("checking API response for '%s'", jqArg))
-				healthCmd := fmt.Sprintf("cilium-health status -o json | jq '%s'", jqArg)
-				status := kubectl.CiliumExec(cilium1, healthCmd)
-				Expect(status.Output().String()).Should(ContainSubstring("null"))
-				status.ExpectSuccess()
+				filter := fmt.Sprintf("{.nodes[%d].%s}", node, path)
+				By("checking API response for %q", filter)
+				data, err := status.Filter(filter)
+				Expect(err).To(BeNil(), "cannot retrieve filter %q from health output", filter)
+				Expect(data.String()).Should(Not((BeEmpty())))
+				statusFilter := fmt.Sprintf("{.nodes[%d].%s.status}", node, path)
+				By("checking API status response for %q", statusFilter)
+				data, err = status.Filter(statusFilter)
+				Expect(err).To(BeNil(), "cannot retrieve filter %q from health output", statusFilter)
+				Expect(data.String()).Should(BeEmpty())
 			}
 		}
 	}, 30)

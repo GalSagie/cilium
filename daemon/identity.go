@@ -17,9 +17,11 @@ package main
 import (
 	"github.com/cilium/cilium/api/v1/models"
 	. "github.com/cilium/cilium/api/v1/server/restapi/policy"
+	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/policy"
 
 	"github.com/go-openapi/runtime/middleware"
 )
@@ -35,9 +37,9 @@ func (h *getIdentity) Handle(params GetIdentityParams) middleware.Responder {
 	if params.Labels == nil {
 		// if labels is nil, return all identities from the kvstore
 		// This is in response to "identity list" command
-		identities = policy.GetIdentities()
+		identities = cache.GetIdentities()
 	} else {
-		identity := policy.LookupIdentity(labels.NewLabelsFromModel(params.Labels))
+		identity := cache.LookupIdentity(labels.NewLabelsFromModel(params.Labels))
 		if identity == nil {
 			return NewGetIdentityIDNotFound()
 		}
@@ -53,15 +55,29 @@ type getIdentityID struct{}
 func newGetIdentityIDHandler(d *Daemon) GetIdentityIDHandler { return &getIdentityID{} }
 
 func (h *getIdentityID) Handle(params GetIdentityIDParams) middleware.Responder {
-	nid, err := policy.ParseNumericIdentity(params.ID)
+	nid, err := identity.ParseNumericIdentity(params.ID)
 	if err != nil {
 		return NewGetIdentityIDBadRequest()
 	}
 
-	identity := policy.LookupIdentityByID(nid)
+	identity := cache.LookupIdentityByID(nid)
 	if identity == nil {
 		return NewGetIdentityIDNotFound()
 	}
 
 	return NewGetIdentityIDOK().WithPayload(identity.GetModel())
+}
+
+type getIdentityEndpoints struct{}
+
+func newGetIdentityEndpointsIDHandler(d *Daemon) GetIdentityEndpointsHandler {
+	return &getIdentityEndpoints{}
+}
+
+func (h *getIdentityEndpoints) Handle(params GetIdentityEndpointsParams) middleware.Responder {
+	log.WithField(logfields.Params, logfields.Repr(params)).Debug("GET /identity/endpoints request")
+
+	identities := identitymanager.GetIdentityModels()
+
+	return NewGetIdentityEndpointsOK().WithPayload(identities)
 }

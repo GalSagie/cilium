@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // DeleteEndpointIDOKCode is the HTTP code returned for type DeleteEndpointIDOK
@@ -25,11 +25,14 @@ type DeleteEndpointIDOK struct {
 
 // NewDeleteEndpointIDOK creates DeleteEndpointIDOK with default headers values
 func NewDeleteEndpointIDOK() *DeleteEndpointIDOK {
+
 	return &DeleteEndpointIDOK{}
 }
 
 // WriteResponse to the client
 func (o *DeleteEndpointIDOK) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(200)
 }
@@ -51,6 +54,7 @@ type DeleteEndpointIDErrors struct {
 
 // NewDeleteEndpointIDErrors creates DeleteEndpointIDErrors with default headers values
 func NewDeleteEndpointIDErrors() *DeleteEndpointIDErrors {
+
 	return &DeleteEndpointIDErrors{}
 }
 
@@ -73,7 +77,6 @@ func (o *DeleteEndpointIDErrors) WriteResponse(rw http.ResponseWriter, producer 
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // DeleteEndpointIDInvalidCode is the HTTP code returned for type DeleteEndpointIDInvalid
@@ -95,6 +98,7 @@ type DeleteEndpointIDInvalid struct {
 
 // NewDeleteEndpointIDInvalid creates DeleteEndpointIDInvalid with default headers values
 func NewDeleteEndpointIDInvalid() *DeleteEndpointIDInvalid {
+
 	return &DeleteEndpointIDInvalid{}
 }
 
@@ -117,7 +121,6 @@ func (o *DeleteEndpointIDInvalid) WriteResponse(rw http.ResponseWriter, producer
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // DeleteEndpointIDNotFoundCode is the HTTP code returned for type DeleteEndpointIDNotFound
@@ -132,11 +135,14 @@ type DeleteEndpointIDNotFound struct {
 
 // NewDeleteEndpointIDNotFound creates DeleteEndpointIDNotFound with default headers values
 func NewDeleteEndpointIDNotFound() *DeleteEndpointIDNotFound {
+
 	return &DeleteEndpointIDNotFound{}
 }
 
 // WriteResponse to the client
 func (o *DeleteEndpointIDNotFound) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(404)
 }

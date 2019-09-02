@@ -55,13 +55,16 @@ var policyWaitCmd = &cobra.Command{
 			notReady := 0
 
 			for _, ep := range eps {
-				if ep.Policy != nil {
-					if ep.PolicyRevision >= reqRevision &&
-						ep.State == models.EndpointStateReady {
-						ready++
-					} else if ep.State == models.EndpointStateNotReady {
-						notReady++
-					}
+				switch {
+				case ep.Status.Policy == nil || ep.Status.Policy.Realized == nil:
+					notReady++
+
+				case ep.Status.Policy.Realized.PolicyRevision >= reqRevision &&
+					ep.Status.State == models.EndpointStateReady:
+					ready++
+
+				case ep.Status.State == models.EndpointStateNotReady:
+					notReady++
 				}
 			}
 

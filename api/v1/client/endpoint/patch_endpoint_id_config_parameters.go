@@ -6,10 +6,9 @@ package endpoint
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"context"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
@@ -17,7 +16,7 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // NewPatchEndpointIDConfigParams creates a new PatchEndpointIDConfigParams object
@@ -64,11 +63,11 @@ for the patch endpoint ID config operation typically these are written to a http
 */
 type PatchEndpointIDConfigParams struct {
 
-	/*Configuration*/
-	Configuration models.ConfigurationMap
+	/*EndpointConfiguration*/
+	EndpointConfiguration *models.EndpointConfigurationSpec
 	/*ID
-	  String describing an endpoint with the format `[prefix:]id`. If no prefix
-	is specified, a prefix of `cilium-local:` is assumed. Not all endpoints
+	  String describing an endpoint with the format ``[prefix:]id``. If no prefix
+	is specified, a prefix of ``cilium-local:`` is assumed. Not all endpoints
 	will be addressable by all endpoint ID prefixes with the exception of the
 	local Cilium UUID which is assigned to all endpoints.
 
@@ -122,15 +121,15 @@ func (o *PatchEndpointIDConfigParams) SetHTTPClient(client *http.Client) {
 	o.HTTPClient = client
 }
 
-// WithConfiguration adds the configuration to the patch endpoint ID config params
-func (o *PatchEndpointIDConfigParams) WithConfiguration(configuration models.ConfigurationMap) *PatchEndpointIDConfigParams {
-	o.SetConfiguration(configuration)
+// WithEndpointConfiguration adds the endpointConfiguration to the patch endpoint ID config params
+func (o *PatchEndpointIDConfigParams) WithEndpointConfiguration(endpointConfiguration *models.EndpointConfigurationSpec) *PatchEndpointIDConfigParams {
+	o.SetEndpointConfiguration(endpointConfiguration)
 	return o
 }
 
-// SetConfiguration adds the configuration to the patch endpoint ID config params
-func (o *PatchEndpointIDConfigParams) SetConfiguration(configuration models.ConfigurationMap) {
-	o.Configuration = configuration
+// SetEndpointConfiguration adds the endpointConfiguration to the patch endpoint ID config params
+func (o *PatchEndpointIDConfigParams) SetEndpointConfiguration(endpointConfiguration *models.EndpointConfigurationSpec) {
+	o.EndpointConfiguration = endpointConfiguration
 }
 
 // WithID adds the id to the patch endpoint ID config params
@@ -152,8 +151,10 @@ func (o *PatchEndpointIDConfigParams) WriteToRequest(r runtime.ClientRequest, re
 	}
 	var res []error
 
-	if err := r.SetBodyParam(o.Configuration); err != nil {
-		return err
+	if o.EndpointConfiguration != nil {
+		if err := r.SetBodyParam(o.EndpointConfiguration); err != nil {
+			return err
+		}
 	}
 
 	// path param id

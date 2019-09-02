@@ -26,10 +26,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var log = logging.DefaultLogger
+var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "map-cidr")
 
 const (
-	MapName = "cilium_cidr_"
+	MapName    = "cilium_cidr_"
+	MaxEntries = 16384
 )
 
 // CIDRMap refers to an LPM trie map at 'path'.
@@ -38,10 +39,13 @@ type CIDRMap struct {
 	Fd        int
 	AddrSize  int // max prefix length in bytes, 4 for IPv4, 16 for IPv6
 	Prefixlen uint32
+
+	// PrefixIsDynamic determines whether it's valid for entries to have
+	// a prefix length that is not equal to the Prefixlen above
+	PrefixIsDynamic bool
 }
 
 const (
-	MAX_KEYS           = 1024
 	LPM_MAP_VALUE_SIZE = 1
 )
 
@@ -66,23 +70,37 @@ func (cm *CIDRMap) keyCidrInit(key cidrKey) (cidr net.IPNet) {
 	return
 }
 
+// checkPrefixlen checks whether it's valid to manipulate elements in the map
+// with the specified key. If it's unsupported, it returns an error.
+func (cm *CIDRMap) checkPrefixlen(key *cidrKey, operation string) error {
+	if cm.Prefixlen != 0 &&
+		((cm.PrefixIsDynamic && cm.Prefixlen < key.Prefixlen) ||
+			(!cm.PrefixIsDynamic && cm.Prefixlen != key.Prefixlen)) {
+		return fmt.Errorf("Unable to %s element with dynamic prefix length cm.Prefixlen=%d key.Prefixlen=%d",
+			operation, cm.Prefixlen, key.Prefixlen)
+	}
+	return nil
+}
+
 // InsertCIDR inserts an entry to 'cm' with key 'cidr'. Value is currently not
 // used.
 func (cm *CIDRMap) InsertCIDR(cidr net.IPNet) error {
 	key := cm.cidrKeyInit(cidr)
 	entry := [LPM_MAP_VALUE_SIZE]byte{}
-	if cm.Prefixlen != 0 && cm.Prefixlen != key.Prefixlen {
-		return fmt.Errorf("Unable to update element with different prefixlen than map!")
+	if err := cm.checkPrefixlen(&key, "update"); err != nil {
+		return err
 	}
+	log.WithField(logfields.Path, cm.path).Debugf("Inserting CIDR entry %s", cidr.String())
 	return bpf.UpdateElement(cm.Fd, unsafe.Pointer(&key), unsafe.Pointer(&entry), 0)
 }
 
 // DeleteCIDR deletes an entry from 'cm' with key 'cidr'.
 func (cm *CIDRMap) DeleteCIDR(cidr net.IPNet) error {
 	key := cm.cidrKeyInit(cidr)
-	if cm.Prefixlen != 0 && cm.Prefixlen != key.Prefixlen {
-		return fmt.Errorf("Unable to delete element with different prefixlen than map!")
+	if err := cm.checkPrefixlen(&key, "delete"); err != nil {
+		return err
 	}
+	log.WithField(logfields.Path, cm.path).Debugf("Removing CIDR entry %s", cidr.String())
 	return bpf.DeleteElement(cm.Fd, unsafe.Pointer(&key))
 }
 
@@ -141,7 +159,7 @@ func (cm *CIDRMap) Close() error {
 // whether element's prefixlen can vary and we thus need to use a LPM
 // trie instead of hash table.
 func OpenMap(path string, prefixlen int, prefixdyn bool) (*CIDRMap, bool, error) {
-	return OpenMapElems(path, prefixlen, prefixdyn, MAX_KEYS)
+	return OpenMapElems(path, prefixlen, prefixdyn, MaxEntries)
 }
 
 // OpenMapElems is the same as OpenMap only with defined maxelem as argument.
@@ -163,19 +181,39 @@ func OpenMapElems(path string, prefixlen int, prefixdyn bool, maxelem uint32) (*
 		uint32(unsafe.Sizeof(uint32(0))+uintptr(bytes)),
 		uint32(LPM_MAP_VALUE_SIZE),
 		maxelem,
-		bpf.BPF_F_NO_PREALLOC,
+		bpf.BPF_F_NO_PREALLOC, 0,
 	)
 
 	if err != nil {
-		log.Debug("Kernel does not support CIDR maps, using inline bpf tables instead.")
-		return nil, false, err
+		log.Debug("Kernel does not support CIDR maps, using hash table instead.")
+		typeMap = bpf.BPF_MAP_TYPE_HASH
+		fd, isNewMap, err = bpf.OpenOrCreateMap(
+			path,
+			typeMap,
+			uint32(unsafe.Sizeof(uint32(0))+uintptr(bytes)),
+			uint32(LPM_MAP_VALUE_SIZE),
+			maxelem,
+			bpf.BPF_F_NO_PREALLOC, 0,
+		)
+		if err != nil {
+			scopedLog := log.WithError(err).WithField(logfields.Path, path)
+			scopedLog.Warning("Failed to create CIDR map")
+			return nil, false, err
+		}
 	}
 
-	m := &CIDRMap{path: path, Fd: fd, AddrSize: bytes, Prefixlen: uint32(prefix)}
+	m := &CIDRMap{
+		path:            path,
+		Fd:              fd,
+		AddrSize:        bytes,
+		Prefixlen:       uint32(prefix),
+		PrefixIsDynamic: prefixdyn,
+	}
 
 	log.WithFields(logrus.Fields{
 		logfields.Path: path,
 		"fd":           fd,
+		"LPM":          typeMap == bpf.BPF_MAP_TYPE_LPM_TRIE,
 	}).Debug("Created CIDR map")
 
 	return m, isNewMap, nil

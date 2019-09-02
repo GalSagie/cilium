@@ -15,13 +15,13 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // NewPatchEndpointIDConfigParams creates a new PatchEndpointIDConfigParams object
-// with the default values initialized.
+// no default values defined in spec.
 func NewPatchEndpointIDConfigParams() PatchEndpointIDConfigParams {
-	var ()
+
 	return PatchEndpointIDConfigParams{}
 }
 
@@ -32,15 +32,15 @@ func NewPatchEndpointIDConfigParams() PatchEndpointIDConfigParams {
 type PatchEndpointIDConfigParams struct {
 
 	// HTTP Request Object
-	HTTPRequest *http.Request
+	HTTPRequest *http.Request `json:"-"`
 
 	/*
 	  Required: true
 	  In: body
 	*/
-	Configuration models.ConfigurationMap
-	/*String describing an endpoint with the format `[prefix:]id`. If no prefix
-	is specified, a prefix of `cilium-local:` is assumed. Not all endpoints
+	EndpointConfiguration *models.EndpointConfigurationSpec
+	/*String describing an endpoint with the format ``[prefix:]id``. If no prefix
+	is specified, a prefix of ``cilium-local:`` is assumed. Not all endpoints
 	will be addressable by all endpoint ID prefixes with the exception of the
 	local Cilium UUID which is assigned to all endpoints.
 
@@ -59,35 +59,36 @@ type PatchEndpointIDConfigParams struct {
 }
 
 // BindRequest both binds and validates a request, it assumes that complex things implement a Validatable(strfmt.Registry) error interface
-// for simple values it will use straight method calls
+// for simple values it will use straight method calls.
+//
+// To ensure default values, the struct must have been initialized with NewPatchEndpointIDConfigParams() beforehand.
 func (o *PatchEndpointIDConfigParams) BindRequest(r *http.Request, route *middleware.MatchedRoute) error {
 	var res []error
+
 	o.HTTPRequest = r
 
 	if runtime.HasBody(r) {
 		defer r.Body.Close()
-		var body models.ConfigurationMap
+		var body models.EndpointConfigurationSpec
 		if err := route.Consumer.Consume(r.Body, &body); err != nil {
 			if err == io.EOF {
-				res = append(res, errors.Required("configuration", "body"))
+				res = append(res, errors.Required("endpointConfiguration", "body"))
 			} else {
-				res = append(res, errors.NewParseError("configuration", "body", "", err))
+				res = append(res, errors.NewParseError("endpointConfiguration", "body", "", err))
 			}
-
 		} else {
+			// validate body object
 			if err := body.Validate(route.Formats); err != nil {
 				res = append(res, err)
 			}
 
 			if len(res) == 0 {
-				o.Configuration = body
+				o.EndpointConfiguration = &body
 			}
 		}
-
 	} else {
-		res = append(res, errors.Required("configuration", "body"))
+		res = append(res, errors.Required("endpointConfiguration", "body"))
 	}
-
 	rID, rhkID, _ := route.Params.GetOK("id")
 	if err := o.bindID(rID, rhkID, route.Formats); err != nil {
 		res = append(res, err)
@@ -99,11 +100,15 @@ func (o *PatchEndpointIDConfigParams) BindRequest(r *http.Request, route *middle
 	return nil
 }
 
+// bindID binds and validates parameter ID from path.
 func (o *PatchEndpointIDConfigParams) bindID(rawData []string, hasKey bool, formats strfmt.Registry) error {
 	var raw string
 	if len(rawData) > 0 {
 		raw = rawData[len(rawData)-1]
 	}
+
+	// Required: true
+	// Parameter is provided by construction from the route
 
 	o.ID = raw
 

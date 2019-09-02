@@ -14,52 +14,89 @@
 
 package labels
 
+import (
+	"sort"
+	"strings"
+)
+
 // LabelArray is an array of labels forming a set
-type LabelArray []*Label
+type LabelArray []Label
+
+// Sort is an internal utility to return all LabelArrays in sorted
+// order, when the source material may be unsorted.  'ls' is sorted
+// in-place, but also returns the sorted array for convenience.
+func (ls LabelArray) Sort() LabelArray {
+	sort.Slice(ls, func(i, j int) bool {
+		return ls[i].Key < ls[j].Key
+	})
+	return ls
+}
 
 // ParseLabelArray parses a list of labels and returns a LabelArray
 func ParseLabelArray(labels ...string) LabelArray {
-	array := make([]*Label, len(labels))
+	array := make(LabelArray, len(labels))
 	for i := range labels {
 		array[i] = ParseLabel(labels[i])
 	}
-	return array
+	return array.Sort()
 }
 
 // ParseSelectLabelArray parses a list of select labels and returns a LabelArray
 func ParseSelectLabelArray(labels ...string) LabelArray {
-	array := make([]*Label, len(labels))
+	array := make(LabelArray, len(labels))
 	for i := range labels {
 		array[i] = ParseSelectLabel(labels[i])
 	}
-	return array
+	return array.Sort()
 }
 
 // ParseLabelArrayFromArray converts an array of strings as labels and returns a LabelArray
 func ParseLabelArrayFromArray(base []string) LabelArray {
-	array := make([]*Label, len(base))
+	array := make(LabelArray, len(base))
 	for i := range base {
 		array[i] = ParseLabel(base[i])
+	}
+	return array.Sort()
+}
+
+// NewLabelArrayFromSortedList returns labels based on the output of SortedList()
+// Trailing ';' will result in an empty key that must be filtered out.
+func NewLabelArrayFromSortedList(list string) LabelArray {
+	base := strings.Split(list, ";")
+	array := make(LabelArray, 0, len(base))
+	for _, v := range base {
+		if lbl := ParseLabel(v); lbl.Key != "" {
+			array = append(array, lbl)
+		}
 	}
 	return array
 }
 
 // ParseSelectLabelArrayFromArray converts an array of strings as select labels and returns a LabelArray
 func ParseSelectLabelArrayFromArray(base []string) LabelArray {
-	array := make([]*Label, len(base))
+	array := make(LabelArray, len(base))
 	for i := range base {
 		array[i] = ParseSelectLabel(base[i])
 	}
-	return array
+	return array.Sort()
+}
+
+// Labels returns the LabelArray as Labels
+func (ls LabelArray) Labels() Labels {
+	lbls := Labels{}
+	for _, l := range ls {
+		lbls[l.Key] = l
+	}
+	return lbls
 }
 
 // Contains returns true if all ls contains all the labels in needed. If
 // needed contains no labels, Contains() will always return true
 func (ls LabelArray) Contains(needed LabelArray) bool {
 nextLabel:
-	for _, neededLabel := range needed {
-		for _, l := range ls {
-			if neededLabel.Matches(l) {
+	for i := range needed {
+		for l := range ls {
+			if needed[i].matches(&ls[l]) {
 				continue nextLabel
 			}
 		}
@@ -74,14 +111,14 @@ nextLabel:
 func (ls LabelArray) Lacks(needed LabelArray) LabelArray {
 	missing := LabelArray{}
 nextLabel:
-	for _, neededLabel := range needed {
-		for _, l := range ls {
-			if neededLabel.Matches(l) {
+	for i := range needed {
+		for l := range ls {
+			if needed[i].matches(&ls[l]) {
 				continue nextLabel
 			}
 		}
 
-		missing = append(missing, neededLabel)
+		missing = append(missing, needed[i])
 	}
 
 	return missing
@@ -91,17 +128,17 @@ nextLabel:
 // Implementation of the k8s.io/apimachinery/pkg/labels.Labels interface.
 func (ls LabelArray) Has(key string) bool {
 	// The key is submitted in the form of `source.key=value`
-	ck := GetCiliumKeyFrom(key)
-	keyLabel := ParseLabel(ck)
+	keyLabel := parseSelectLabel(key, '.')
 	if keyLabel.IsAnySource() {
-		for _, lsl := range ls {
-			if lsl.Key == keyLabel.Key {
+		for l := range ls {
+			if ls[l].Key == keyLabel.Key {
 				return true
 			}
 		}
 	} else {
 		for _, lsl := range ls {
-			if lsl.GetExtendedKey() == key {
+			// Note that if '=value' is part of 'key' it is ignored here
+			if lsl.Source == keyLabel.Source && lsl.Key == keyLabel.Key {
 				return true
 			}
 		}
@@ -112,17 +149,16 @@ func (ls LabelArray) Has(key string) bool {
 // Get returns the value for the provided key.
 // Implementation of the k8s.io/apimachinery/pkg/labels.Labels interface.
 func (ls LabelArray) Get(key string) string {
-	ck := GetCiliumKeyFrom(key)
-	keyLabel := ParseLabel(ck)
+	keyLabel := parseSelectLabel(key, '.')
 	if keyLabel.IsAnySource() {
-		for _, lsl := range ls {
-			if lsl.Key == keyLabel.Key {
-				return lsl.Value
+		for l := range ls {
+			if ls[l].Key == keyLabel.Key {
+				return ls[l].Value
 			}
 		}
 	} else {
 		for _, lsl := range ls {
-			if lsl.GetExtendedKey() == key {
+			if lsl.Source == keyLabel.Source && lsl.Key == keyLabel.Key {
 				return lsl.Value
 			}
 		}
@@ -136,10 +172,8 @@ func (ls LabelArray) DeepCopy() LabelArray {
 		return nil
 	}
 
-	o := make(LabelArray, 0, len(ls))
-	for _, v := range ls {
-		o = append(o, v.DeepCopy())
-	}
+	o := make(LabelArray, len(ls))
+	copy(o, ls)
 	return o
 }
 
@@ -147,12 +181,47 @@ func (ls LabelArray) DeepCopy() LabelArray {
 // The output is parseable by ParseLabelArrayFromArray
 func (ls LabelArray) GetModel() []string {
 	res := []string{}
-	for _, v := range ls {
-		if v == nil {
-			res = append(res, "")
-		} else {
-			res = append(res, v.String())
-		}
+	for l := range ls {
+		res = append(res, ls[l].String())
 	}
 	return res
+}
+
+func (ls LabelArray) String() string {
+	res := "["
+	for l := range ls {
+		if l > 0 {
+			res += " "
+		}
+		res += ls[l].String()
+	}
+	res += "]"
+	return res
+}
+
+// StringMap converts LabelArray into map[string]string
+// Note: The source is included in the keys with a ':' separator.
+// Note: LabelArray does not deduplicate entries, as it is an array. It is
+// possible for the output to contain fewer entries when the source and key are
+// repeated in a LabelArray, as that is the key of the output. This scenario is
+// not expected.
+func (ls LabelArray) StringMap() map[string]string {
+	o := map[string]string{}
+	for _, v := range ls {
+		o[v.Source+":"+v.Key] = v.Value
+	}
+	return o
+}
+
+// Same returns true if the label arrays are the same, i.e., have the same labels in the same order.
+func (ls LabelArray) Same(b LabelArray) bool {
+	if len(ls) != len(b) {
+		return false
+	}
+	for l := range ls {
+		if !ls[l].Equals(&b[l]) {
+			return false
+		}
+	}
+	return true
 }

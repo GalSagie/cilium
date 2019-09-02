@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !privileged_tests
+
 package labels
 
 import (
-	"github.com/cilium/cilium/pkg/comparator"
+	"sort"
+
+	"github.com/cilium/cilium/pkg/checker"
 
 	. "gopkg.in/check.v1"
 )
@@ -42,10 +46,14 @@ func (s *LabelsSuite) TestMatches(c *C) {
 }
 
 func (s *LabelsSuite) TestParse(c *C) {
-	c.Assert(ParseLabelArray(), comparator.DeepEquals, LabelArray{})
-	c.Assert(ParseLabelArray("magic"), comparator.DeepEquals, LabelArray{ParseLabel("magic")})
-	c.Assert(ParseLabelArray("a", "b", "c"), comparator.DeepEquals,
+	c.Assert(ParseLabelArray(), checker.DeepEquals, LabelArray{})
+	c.Assert(ParseLabelArray("magic"), checker.DeepEquals, LabelArray{ParseLabel("magic")})
+	// LabelArray is sorted
+	c.Assert(ParseLabelArray("a", "c", "b"), checker.DeepEquals,
 		LabelArray{ParseLabel("a"), ParseLabel("b"), ParseLabel("c")})
+	// NewLabelArrayFromSortedList
+	c.Assert(NewLabelArrayFromSortedList("unspec:a=;unspec:b;unspec:c=d"), checker.DeepEquals,
+		LabelArray{ParseLabel("a"), ParseLabel("b"), ParseLabel("c=d")})
 }
 
 func (s *LabelsSuite) TestHas(c *C) {
@@ -73,5 +81,107 @@ func (s *LabelsSuite) TestHas(c *C) {
 	for _, tt := range hasTests {
 		c.Logf("has %q?", tt.input)
 		c.Assert(lbls.Has(tt.input), Equals, tt.expected)
+	}
+}
+
+func (s *LabelsSuite) TestSame(c *C) {
+	lbls1 := LabelArray{
+		NewLabel("env", "devel", LabelSourceAny),
+		NewLabel("user", "bob", LabelSourceContainer),
+	}
+	lbls2 := LabelArray{
+		NewLabel("env", "devel", LabelSourceAny),
+		NewLabel("user", "bob", LabelSourceContainer),
+	}
+	lbls3 := LabelArray{
+		NewLabel("user", "bob", LabelSourceContainer),
+		NewLabel("env", "devel", LabelSourceAny),
+	}
+	lbls4 := LabelArray{
+		NewLabel("env", "devel", LabelSourceAny),
+	}
+	lbls5 := LabelArray{
+		NewLabel("env", "prod", LabelSourceAny),
+	}
+	lbls6 := LabelArray{}
+
+	c.Assert(lbls1.Same(lbls1), Equals, true)
+	c.Assert(lbls1.Same(lbls2), Equals, true)
+	c.Assert(lbls1.Same(lbls3), Equals, false) // inverted order
+	c.Assert(lbls1.Same(lbls4), Equals, false) // different count
+	c.Assert(lbls1.Same(lbls5), Equals, false)
+	c.Assert(lbls1.Same(lbls6), Equals, false)
+
+	c.Assert(lbls2.Same(lbls1), Equals, true)
+	c.Assert(lbls2.Same(lbls2), Equals, true)
+	c.Assert(lbls2.Same(lbls3), Equals, false) // inverted order
+	c.Assert(lbls2.Same(lbls4), Equals, false) // different count
+	c.Assert(lbls2.Same(lbls5), Equals, false)
+	c.Assert(lbls2.Same(lbls6), Equals, false)
+
+	c.Assert(lbls3.Same(lbls1), Equals, false)
+	c.Assert(lbls3.Same(lbls2), Equals, false)
+	c.Assert(lbls3.Same(lbls3), Equals, true)
+	c.Assert(lbls3.Same(lbls4), Equals, false)
+	c.Assert(lbls3.Same(lbls5), Equals, false)
+	c.Assert(lbls3.Same(lbls6), Equals, false)
+
+	c.Assert(lbls4.Same(lbls1), Equals, false)
+	c.Assert(lbls4.Same(lbls2), Equals, false)
+	c.Assert(lbls4.Same(lbls3), Equals, false)
+	c.Assert(lbls4.Same(lbls4), Equals, true)
+	c.Assert(lbls4.Same(lbls5), Equals, false)
+	c.Assert(lbls4.Same(lbls6), Equals, false)
+
+	c.Assert(lbls5.Same(lbls1), Equals, false)
+	c.Assert(lbls5.Same(lbls2), Equals, false)
+	c.Assert(lbls5.Same(lbls3), Equals, false)
+	c.Assert(lbls5.Same(lbls4), Equals, false)
+	c.Assert(lbls5.Same(lbls5), Equals, true)
+	c.Assert(lbls5.Same(lbls6), Equals, false)
+
+	c.Assert(lbls6.Same(lbls1), Equals, false)
+	c.Assert(lbls6.Same(lbls2), Equals, false)
+	c.Assert(lbls6.Same(lbls3), Equals, false)
+	c.Assert(lbls6.Same(lbls4), Equals, false)
+	c.Assert(lbls6.Same(lbls5), Equals, false)
+	c.Assert(lbls6.Same(lbls6), Equals, true)
+}
+
+// TestOutputConversions tests the various ways a LabelArray can be converted
+// into other representations
+func (s *LabelsSuite) TestOutputConversions(c *C) {
+	lbls := LabelArray{
+		NewLabel("env", "devel", LabelSourceAny),
+		NewLabel("user", "bob", LabelSourceContainer),
+		NewLabel("something", "somethingelse", LabelSourceK8s),
+		NewLabel("nosource", "value", ""),
+		NewLabel("nosource", "value", "actuallyASource"),
+	}
+
+	expectMdl := []string{"any:env=devel", "container:user=bob", "k8s:something=somethingelse", "unspec:nosource=value", "actuallyASource:nosource=value"}
+	sort.StringSlice(expectMdl).Sort()
+	mdl := lbls.GetModel()
+	sort.StringSlice(mdl).Sort()
+	c.Assert(len(mdl), Equals, len(expectMdl))
+	for i := range mdl {
+		c.Assert(mdl[i], Equals, expectMdl[i])
+	}
+
+	expectString := "[any:env=devel container:user=bob k8s:something=somethingelse unspec:nosource=value actuallyASource:nosource=value]"
+	c.Assert(lbls.String(), Equals, expectString)
+
+	// Note: the two nosource entries do not alias when rendered into the StringMap
+	// format, because they have different sources.
+	expectMap := map[string]string{
+		"any:env":                       "devel",
+		"container:user":                "bob",
+		"k8s:something":                 "somethingelse",
+		LabelSourceUnspec + ":nosource": "value",
+		"actuallyASource:nosource":      "value"}
+	mp := lbls.StringMap()
+	c.Assert(len(mp), Equals, len(expectMap))
+	for k, v := range mp {
+		c.Assert(v, Equals, expectMap[k])
 	}
 }

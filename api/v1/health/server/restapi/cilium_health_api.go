@@ -29,6 +29,8 @@ func NewCiliumHealthAPI(spec *loads.Document) *CiliumHealthAPI {
 		formats:             strfmt.Default,
 		defaultConsumes:     "application/json",
 		defaultProduces:     "application/json",
+		customConsumers:     make(map[string]runtime.Consumer),
+		customProducers:     make(map[string]runtime.Producer),
 		ServerShutdown:      func() {},
 		spec:                spec,
 		ServeError:          errors.ServeError,
@@ -39,9 +41,6 @@ func NewCiliumHealthAPI(spec *loads.Document) *CiliumHealthAPI {
 		JSONProducer:        runtime.JSONProducer(),
 		GetHealthzHandler: GetHealthzHandlerFunc(func(params GetHealthzParams) middleware.Responder {
 			return middleware.NotImplemented("operation GetHealthz has not yet been implemented")
-		}),
-		GetHelloHandler: GetHelloHandlerFunc(func(params GetHelloParams) middleware.Responder {
-			return middleware.NotImplemented("operation GetHello has not yet been implemented")
 		}),
 		ConnectivityGetStatusHandler: connectivity.GetStatusHandlerFunc(func(params connectivity.GetStatusParams) middleware.Responder {
 			return middleware.NotImplemented("operation ConnectivityGetStatus has not yet been implemented")
@@ -58,18 +57,20 @@ type CiliumHealthAPI struct {
 	context         *middleware.Context
 	handlers        map[string]map[string]http.Handler
 	formats         strfmt.Registry
+	customConsumers map[string]runtime.Consumer
+	customProducers map[string]runtime.Producer
 	defaultConsumes string
 	defaultProduces string
 	Middleware      func(middleware.Builder) http.Handler
 
 	// BasicAuthenticator generates a runtime.Authenticator from the supplied basic auth function.
-	// It has a default implemention in the security package, however you can replace it for your particular usage.
+	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	BasicAuthenticator func(security.UserPassAuthentication) runtime.Authenticator
 	// APIKeyAuthenticator generates a runtime.Authenticator from the supplied token auth function.
-	// It has a default implemention in the security package, however you can replace it for your particular usage.
+	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	APIKeyAuthenticator func(string, string, security.TokenAuthentication) runtime.Authenticator
 	// BearerAuthenticator generates a runtime.Authenticator from the supplied bearer token auth function.
-	// It has a default implemention in the security package, however you can replace it for your particular usage.
+	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	BearerAuthenticator func(string, security.ScopedTokenAuthentication) runtime.Authenticator
 
 	// JSONConsumer registers a consumer for a "application/json" mime type
@@ -80,8 +81,6 @@ type CiliumHealthAPI struct {
 
 	// GetHealthzHandler sets the operation handler for the get healthz operation
 	GetHealthzHandler GetHealthzHandler
-	// GetHelloHandler sets the operation handler for the get hello operation
-	GetHelloHandler GetHelloHandler
 	// ConnectivityGetStatusHandler sets the operation handler for the get status operation
 	ConnectivityGetStatusHandler connectivity.GetStatusHandler
 	// ConnectivityPutStatusProbeHandler sets the operation handler for the put status probe operation
@@ -153,10 +152,6 @@ func (o *CiliumHealthAPI) Validate() error {
 		unregistered = append(unregistered, "GetHealthzHandler")
 	}
 
-	if o.GetHelloHandler == nil {
-		unregistered = append(unregistered, "GetHelloHandler")
-	}
-
 	if o.ConnectivityGetStatusHandler == nil {
 		unregistered = append(unregistered, "connectivity.GetStatusHandler")
 	}
@@ -202,6 +197,10 @@ func (o *CiliumHealthAPI) ConsumersFor(mediaTypes []string) map[string]runtime.C
 			result["application/json"] = o.JSONConsumer
 
 		}
+
+		if c, ok := o.customConsumers[mt]; ok {
+			result[mt] = c
+		}
 	}
 	return result
 
@@ -217,6 +216,10 @@ func (o *CiliumHealthAPI) ProducersFor(mediaTypes []string) map[string]runtime.P
 		case "application/json":
 			result["application/json"] = o.JSONProducer
 
+		}
+
+		if p, ok := o.customProducers[mt]; ok {
+			result[mt] = p
 		}
 	}
 	return result
@@ -263,11 +266,6 @@ func (o *CiliumHealthAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
-	o.handlers["GET"]["/hello"] = NewGetHello(o.context, o.GetHelloHandler)
-
-	if o.handlers["GET"] == nil {
-		o.handlers["GET"] = make(map[string]http.Handler)
-	}
 	o.handlers["GET"]["/status"] = connectivity.NewGetStatus(o.context, o.ConnectivityGetStatusHandler)
 
 	if o.handlers["PUT"] == nil {
@@ -288,9 +286,19 @@ func (o *CiliumHealthAPI) Serve(builder middleware.Builder) http.Handler {
 	return o.context.APIHandler(builder)
 }
 
-// Init allows you to just initialize the handler cache, you can then recompose the middelware as you see fit
+// Init allows you to just initialize the handler cache, you can then recompose the middleware as you see fit
 func (o *CiliumHealthAPI) Init() {
 	if len(o.handlers) == 0 {
 		o.initHandlerCache()
 	}
+}
+
+// RegisterConsumer allows you to add (or override) a consumer for a media type.
+func (o *CiliumHealthAPI) RegisterConsumer(mediaType string, consumer runtime.Consumer) {
+	o.customConsumers[mediaType] = consumer
+}
+
+// RegisterProducer allows you to add (or override) a producer for a media type.
+func (o *CiliumHealthAPI) RegisterProducer(mediaType string, producer runtime.Producer) {
+	o.customProducers[mediaType] = producer
 }

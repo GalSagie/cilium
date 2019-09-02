@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // PutEndpointIDCreatedCode is the HTTP code returned for type PutEndpointIDCreated
@@ -25,11 +25,14 @@ type PutEndpointIDCreated struct {
 
 // NewPutEndpointIDCreated creates PutEndpointIDCreated with default headers values
 func NewPutEndpointIDCreated() *PutEndpointIDCreated {
+
 	return &PutEndpointIDCreated{}
 }
 
 // WriteResponse to the client
 func (o *PutEndpointIDCreated) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(201)
 }
@@ -51,6 +54,7 @@ type PutEndpointIDInvalid struct {
 
 // NewPutEndpointIDInvalid creates PutEndpointIDInvalid with default headers values
 func NewPutEndpointIDInvalid() *PutEndpointIDInvalid {
+
 	return &PutEndpointIDInvalid{}
 }
 
@@ -73,7 +77,6 @@ func (o *PutEndpointIDInvalid) WriteResponse(rw http.ResponseWriter, producer ru
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }
 
 // PutEndpointIDExistsCode is the HTTP code returned for type PutEndpointIDExists
@@ -88,11 +91,14 @@ type PutEndpointIDExists struct {
 
 // NewPutEndpointIDExists creates PutEndpointIDExists with default headers values
 func NewPutEndpointIDExists() *PutEndpointIDExists {
+
 	return &PutEndpointIDExists{}
 }
 
 // WriteResponse to the client
 func (o *PutEndpointIDExists) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+
+	rw.Header().Del(runtime.HeaderContentType) //Remove Content-Type on empty responses
 
 	rw.WriteHeader(409)
 }
@@ -114,6 +120,7 @@ type PutEndpointIDFailed struct {
 
 // NewPutEndpointIDFailed creates PutEndpointIDFailed with default headers values
 func NewPutEndpointIDFailed() *PutEndpointIDFailed {
+
 	return &PutEndpointIDFailed{}
 }
 
@@ -136,5 +143,4 @@ func (o *PutEndpointIDFailed) WriteResponse(rw http.ResponseWriter, producer run
 	if err := producer.Produce(rw, payload); err != nil {
 		panic(err) // let the recovery middleware deal with this
 	}
-
 }

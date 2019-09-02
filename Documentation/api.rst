@@ -1,3 +1,9 @@
+.. only:: not (epub or latex or html)
+
+    WARNING: You are looking at unreleased Cilium documentation.
+    Please use the official rendered version released here:
+    http://docs.cilium.io
+
 .. _api_ref:
 
 #############
@@ -9,10 +15,10 @@ Introduction
 ************
 
 The Cilium API is JSON based and provided by the ``cilium-agent``. The purpose
-of the API is to provide visbility and control over an individual agent
+of the API is to provide visibility and control over an individual agent
 instance. In general, all API calls affect only the resources managed by the
 individual ``cilium-agent`` serving the API. A few selected API calls such as
-the security identity resolution provides cluster wide visbility. Such API
+the security identity resolution provides cluster wide visibility. Such API
 calls are marked specifically. Unless noted otherwise, API calls will only affect
 local agent resources.
 
@@ -82,15 +88,8 @@ The full example can be found in the `cilium/client-example`_ repository.
 Compatibility Guarantees
 ************************
 
-The Cilium API is still marked **unstable** overall at this point but several
-core sections have already matured a lot. We will declare the overall API
-stable with the release of version 1.0. In the meantime, we would like maintain
-the flexibility to adjust to feedback. The APIs are also heavily dependant on
-the evolution of various orchestration systems which have not stabilized yet.
-
-If you are planning to utilize the API and could benefit from a stable API,
-please approach us on Slack and we can discuss marking certain sections of the
-API stable and start maintaining backwards compatibility.
+Cilium API is stable as of version 1.0, backward compatibility will be upheld
+for whole lifecycle of Cilium 1.x.
 
 *************
 API Reference

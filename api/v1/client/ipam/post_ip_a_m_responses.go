@@ -13,7 +13,7 @@ import (
 
 	strfmt "github.com/go-openapi/strfmt"
 
-	"github.com/cilium/cilium/api/v1/models"
+	models "github.com/cilium/cilium/api/v1/models"
 )
 
 // PostIPAMReader is a Reader for the PostIPAM structure.
@@ -54,7 +54,7 @@ func NewPostIPAMCreated() *PostIPAMCreated {
 Success
 */
 type PostIPAMCreated struct {
-	Payload *models.IPAM
+	Payload *models.IPAMResponse
 }
 
 func (o *PostIPAMCreated) Error() string {
@@ -63,7 +63,7 @@ func (o *PostIPAMCreated) Error() string {
 
 func (o *PostIPAMCreated) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
-	o.Payload = new(models.IPAM)
+	o.Payload = new(models.IPAMResponse)
 
 	// response payload
 	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {

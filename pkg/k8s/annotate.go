@@ -1,4 +1,4 @@
-// Copyright 2016-2018 Authors of Cilium
+// Copyright 2016-2019 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,53 +15,100 @@
 package k8s
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 
+	"github.com/cilium/cilium/pkg/annotation"
+	"github.com/cilium/cilium/pkg/cidr"
+	"github.com/cilium/cilium/pkg/controller"
+	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/uuid"
 
 	"github.com/sirupsen/logrus"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 )
 
-// PodEndpoint is the interface that the endpoint representing a pod has to implement
-type PodEndpoint interface {
-	// GetK8sNamespace returns the name of the namespace
-	GetK8sNamespace() string
-
-	// GetK8sPodName returns the name of the pod
-	GetK8sPodName() string
-
-	// StringID returns the ID of the endpoint
-	StringID() string
+// K8sClient is a wrapper around kubernetes.Interface.
+type K8sClient struct {
+	// kubernetes.Interface is the object through which interactions with
+	// Kubernetes are performed.
+	kubernetes.Interface
 }
 
-// AnnotatePod adds a Kubernetes annotation with key annotationKey and value
-// annotationValue
-func AnnotatePod(e PodEndpoint, annotationKey, annotationValue string) error {
+// K8sCiliumClient is a wrapper around clientset.Interface.
+type K8sCiliumClient struct {
+	clientset.Interface
+}
+
+func updateNodeAnnotation(c kubernetes.Interface, nodeName string, v4CIDR, v6CIDR *cidr.CIDR, v4HealthIP, v6HealthIP, v4CiliumHostIP, v6CiliumHostIP net.IP) error {
+	annotations := map[string]string{}
+
+	if v4CIDR != nil {
+		annotations[annotation.V4CIDRName] = v4CIDR.String()
+	}
+	if v6CIDR != nil {
+		annotations[annotation.V6CIDRName] = v6CIDR.String()
+	}
+
+	if v4HealthIP != nil {
+		annotations[annotation.V4HealthName] = v4HealthIP.String()
+	}
+	if v6HealthIP != nil {
+		annotations[annotation.V6HealthName] = v6HealthIP.String()
+	}
+
+	if v4CiliumHostIP != nil {
+		annotations[annotation.CiliumHostIP] = v4CiliumHostIP.String()
+	}
+
+	if v6CiliumHostIP != nil {
+		annotations[annotation.CiliumHostIPv6] = v6CiliumHostIP.String()
+	}
+
+	if len(annotations) == 0 {
+		return nil
+	}
+
+	raw, err := json.Marshal(annotations)
+	if err != nil {
+		return err
+	}
+	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":%s}}`, raw))
+
+	_, err = c.CoreV1().Nodes().Patch(nodeName, types.StrategicMergePatchType, patch)
+
+	return err
+}
+
+// AnnotateNode writes v4 and v6 CIDRs and health IPs in the given k8s node name.
+// In case of failure while updating the node, this function while spawn a go
+// routine to retry the node update indefinitely.
+func (k8sCli K8sClient) AnnotateNode(nodeName string, v4CIDR, v6CIDR *cidr.CIDR, v4HealthIP, v6HealthIP, v4CiliumHostIP, v6CiliumHostIP net.IP) error {
 	scopedLog := log.WithFields(logrus.Fields{
-		logfields.EndpointID:            e.StringID(),
-		logfields.K8sNamespace:          e.GetK8sNamespace(),
-		logfields.K8sPodName:            e.GetK8sPodName(),
-		logfields.K8sIdentityAnnotation: annotationKey,
-		logfields.RetryUUID:             uuid.NewUUID(),
+		logfields.NodeName:       nodeName,
+		logfields.V4Prefix:       v4CIDR,
+		logfields.V6Prefix:       v6CIDR,
+		logfields.V4HealthIP:     v4HealthIP,
+		logfields.V6HealthIP:     v6HealthIP,
+		logfields.V4CiliumHostIP: v4CiliumHostIP,
+		logfields.V6CiliumHostIP: v6CiliumHostIP,
 	})
+	scopedLog.Debug("Updating node annotations with node CIDRs")
 
-	pod, err := Client().CoreV1().Pods(e.GetK8sNamespace()).Get(e.GetK8sPodName(), meta_v1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("unable to annotate pod, cannot retrieve pod: %s", err)
-	}
+	controller.NewManager().UpdateController("update-k8s-node-annotations",
+		controller.ControllerParams{
+			DoFunc: func(_ context.Context) error {
+				err := updateNodeAnnotation(k8sCli, nodeName, v4CIDR, v6CIDR, v4HealthIP, v6HealthIP, v4CiliumHostIP, v6CiliumHostIP)
+				if err != nil {
+					scopedLog.WithFields(logrus.Fields{}).WithError(err).Warn("Unable to patch node resource with annotation")
+					return err
+				}
+				return SetNodeNetworkUnavailableFalse(k8sCli, nodeName)
+			},
+		})
 
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-
-	pod.Annotations[annotationKey] = annotationValue
-	pod, err = Client().CoreV1().Pods(e.GetK8sNamespace()).Update(pod)
-	if err != nil {
-		return fmt.Errorf("unable to annotate pod, cannot update pod: %s", err)
-	}
-
-	scopedLog.Debug("Successfully annotated pod with %s=%s", annotationKey, annotationValue)
 	return nil
 }

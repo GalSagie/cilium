@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2017 Authors of Cilium
+ *  Copyright (C) 2016-2019 Authors of Cilium
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -24,7 +24,7 @@
  * Pass unknown ICMPv6 NS to stack */
 #define ACTION_UNKNOWN_ICMP6_NS TC_ACT_OK
 
-/* Include policy_can_access() */
+/* Include policy_can_access_ingress() */
 #define REQUIRES_CAN_ACCESS
 
 #include <bpf/api.h>
@@ -34,6 +34,7 @@
 
 #include "lib/utils.h"
 #include "lib/common.h"
+#include "lib/arp.h"
 #include "lib/maps.h"
 #include "lib/ipv6.h"
 #include "lib/ipv4.h"
@@ -46,7 +47,42 @@
 #include "lib/policy.h"
 #include "lib/drop.h"
 #include "lib/encap.h"
+#include "lib/nat.h"
+#include "lib/lb.h"
+#include "lib/nodeport.h"
 
+#if defined FROM_HOST && (defined ENABLE_IPV4 || defined ENABLE_IPV6)
+static inline int rewrite_dmac_to_host(struct __sk_buff *skb, __u32 src_identity)
+{
+	/* When attached to cilium_host, we rewrite the DMAC to the mac of
+	 * cilium_host (peer) to ensure the packet is being considered to be
+	 * addressed to the host (PACKET_HOST) */
+	union macaddr cilium_net_mac = CILIUM_NET_MAC;
+
+	/* Rewrite to destination MAC of cilium_net (remote peer) */
+	if (eth_store_daddr(skb, (__u8 *) &cilium_net_mac.addr, 0) < 0)
+		return send_drop_notify_error(skb, src_identity, DROP_WRITE_ERROR, TC_ACT_OK, METRIC_INGRESS);
+
+	return TC_ACT_OK;
+}
+#endif
+
+#if defined ENABLE_IPV4 || defined ENABLE_IPV6
+static inline __u32 finalize_sec_ctx(__u32 secctx, __u32 src_identity)
+{
+#ifdef ENABLE_SECCTX_FROM_IPCACHE
+	/* If we could not derive the secctx from the packet itself but
+	 * from the ipcache instead, then use the ipcache identity. E.g.
+	 * used in ipvlan master device's datapath on ingress.
+	 */
+	if (secctx == WORLD_ID && !identity_is_reserved(src_identity))
+		secctx = src_identity;
+#endif /* ENABLE_SECCTX_FROM_IPCACHE */
+	return secctx;
+}
+#endif
+
+#ifdef ENABLE_IPV6
 static inline __u32 derive_sec_ctx(struct __sk_buff *skb, const union v6addr *node_ip,
 				   struct ipv6hdr *ip6)
 {
@@ -63,146 +99,77 @@ static inline __u32 derive_sec_ctx(struct __sk_buff *skb, const union v6addr *no
 #endif
 }
 
-#ifdef FROM_HOST
-static inline int __inline__
-reverse_proxy6(struct __sk_buff *skb, int l4_off, struct ipv6hdr *ip6, __u8 nh)
+static inline int handle_ipv6(struct __sk_buff *skb, __u32 src_identity)
 {
-	struct proxy6_tbl_value *val;
-	struct proxy6_tbl_key key = {
-		.nexthdr = nh,
-	};
-	union v6addr new_saddr, old_saddr;
-	struct csum_offset csum = {};
-	__be16 new_sport, old_sport;
-	int ret;
-
-	switch (nh) {
-	case IPPROTO_TCP:
-	case IPPROTO_UDP:
-		/* load sport + dport in reverse order, sport=dport, dport=sport */
-		if (skb_load_bytes(skb, l4_off, &key.dport, 4) < 0)
-			return DROP_CT_INVALID_HDR;
-		break;
-	default:
-		/* ignore */
-		return 0;
-	}
-
-	ipv6_addr_copy(&key.saddr, (union v6addr *) &ip6->daddr);
-	ipv6_addr_copy(&old_saddr, (union v6addr *) &ip6->saddr);
-	csum_l4_offset_and_flags(nh, &csum);
-
-	val = map_lookup_elem(&cilium_proxy6, &key);
-	if (!val)
-		return 0;
-
-	ipv6_addr_copy(&new_saddr, (union v6addr *)&val->orig_daddr);
-	new_sport = val->orig_dport;
-	old_sport = key.dport;
-
-	ret = l4_modify_port(skb, l4_off, TCP_SPORT_OFF, &csum, new_sport, old_sport);
-	if (ret < 0)
-		return DROP_WRITE_ERROR;
-
-	ret = ipv6_store_saddr(skb, new_saddr.addr, ETH_HLEN);
-	if (IS_ERR(ret))
-		return DROP_WRITE_ERROR;
-
-	if (csum.offset) {
-		__be32 sum = csum_diff(old_saddr.addr, 16, new_saddr.addr, 16, 0);
-
-		if (csum_l4_replace(skb, l4_off, &csum, 0, sum, BPF_F_PSEUDO_HDR) < 0)
-			return DROP_CSUM_L4;
-	}
-
-	/* Packets which have been translated back from the proxy must
-	 * skip any potential ingress proxy at the endpoint
-	 */
-	skb->tc_index |= TC_INDEX_F_SKIP_PROXY;
-
-	return 0;
-}
-#endif
-
-#ifdef FROM_HOST
-static inline void __inline__ handle_identity_from_proxy(struct __sk_buff *skb, __u32 *identity)
-{
-	__u32 magic = skb->mark & MARK_MAGIC_PROXY_MASK;
-
-	/* Packets from the ingress proxy must skip the proxy when the
-	 * destination endpoint evaluates the policy. As the packet
-	 * would loop otherwise. */
-	if (magic == MARK_MAGIC_PROXY_INGRESS) {
-		*identity = get_identity_via_proxy(skb);
-		skb->tc_index |= TC_INDEX_F_SKIP_PROXY;
-	} else if (magic == MARK_MAGIC_PROXY_EGRESS) {
-		*identity = get_identity_via_proxy(skb);
-	}
-
-	/* Reset packet mark to avoid hitting routing rules again */
-	skb->mark = 0;
-}
-#endif
-
-#ifdef FROM_HOST
-static inline int rewrite_dmac_to_host(struct __sk_buff *skb)
-{
-	/* When attached to cilium_host, we rewrite the DMAC to the mac of
-	 * cilium_host (peer) to ensure the packet is being considered to be
-	 * addressed to the host (PACKET_HOST) */
-	union macaddr cilium_net_mac = CILIUM_NET_MAC;
-
-	/* Rewrite to destination MAC of cilium_net (remote peer) */
-	if (eth_store_daddr(skb, (__u8 *) &cilium_net_mac.addr, 0) < 0)
-		return send_drop_notify_error(skb, DROP_WRITE_ERROR, TC_ACT_OK);
-
-	return TC_ACT_OK;
-}
-#endif
-
-static inline int handle_ipv6(struct __sk_buff *skb, __u32 proxy_identity)
-{
+	struct remote_endpoint_info *info = NULL;
 	union v6addr node_ip = { };
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
 	union v6addr *dst;
-	int l4_off, l3_off = ETH_HLEN;
+	int l4_off, l3_off = ETH_HLEN, hdrlen;
 	struct endpoint_info *ep;
 	__u8 nexthdr;
-	__u32 flowlabel;
+	__u32 secctx;
 
 	if (!revalidate_data(skb, &data, &data_end, &ip6))
 		return DROP_INVALID;
 
+#ifdef ENABLE_NODEPORT
+	if (!bpf_skip_nodeport(skb)) {
+		int ret = nodeport_lb6(skb, src_identity);
+		if (ret < 0)
+			return ret;
+	}
+#if defined(ENCAP_IFINDEX) || defined(NO_REDIRECT)
+	/* See IPv4 case for NO_REDIRECT comments */
+	return TC_ACT_OK;
+#endif /* ENCAP_IFINDEX || NO_REDIRECT */
+	/* Verifier workaround: modified ctx access. */
+	if (!revalidate_data(skb, &data, &data_end, &ip6))
+		return DROP_INVALID;
+#endif /* ENABLE_NODEPORT */
+
 	nexthdr = ip6->nexthdr;
-	l4_off = l3_off + ipv6_hdrlen(skb, l3_off, &nexthdr);
+	hdrlen = ipv6_hdrlen(skb, l3_off, &nexthdr);
+	if (hdrlen < 0)
+		return hdrlen;
+
+	l4_off = l3_off + hdrlen;
 
 #ifdef HANDLE_NS
 	if (unlikely(nexthdr == IPPROTO_ICMPV6)) {
-		int ret = icmp6_handle(skb, ETH_HLEN, ip6);
+		int ret = icmp6_handle(skb, ETH_HLEN, ip6, METRIC_INGRESS);
 		if (IS_ERR(ret))
 			return ret;
 	}
 #endif
 
 	BPF_V6(node_ip, ROUTER_IP);
-	flowlabel = derive_sec_ctx(skb, &node_ip, ip6);
+	secctx = derive_sec_ctx(skb, &node_ip, ip6);
 
+	/* Packets from the proxy will already have a real identity. */
+	if (identity_is_reserved(src_identity)) {
+		union v6addr *src = (union v6addr *) &ip6->saddr;
+		info = ipcache_lookup6(&IPCACHE_MAP, src, V6_CACHE_KEY_LEN);
+		if (info != NULL) {
+			__u32 sec_label = info->sec_label;
+			if (sec_label)
+				src_identity = info->sec_label;
+		}
+		cilium_dbg(skb, info ? DBG_IP_ID_MAP_SUCCEED6 : DBG_IP_ID_MAP_FAILED6,
+			   ((__u32 *) src)[3], src_identity);
+	}
+
+	secctx = finalize_sec_ctx(secctx, src_identity);
 #ifdef FROM_HOST
 	if (1) {
 		int ret;
 
-		if (proxy_identity)
-			flowlabel = proxy_identity;
-
-		ret = reverse_proxy6(skb, l4_off, ip6, ip6->nexthdr);
-		/* DIRECT PACKET READ INVALID */
-		if (IS_ERR(ret))
-			return ret;
+		secctx = src_identity;
 
 		/* If we are attached to cilium_host at egress, this will
 		 * rewrite the destination mac address to the MAC of cilium_net */
-		ret = rewrite_dmac_to_host(skb);
+		ret = rewrite_dmac_to_host(skb, secctx);
 		/* DIRECT PACKET READ INVALID */
 		if (IS_ERR(ret))
 			return ret;
@@ -219,12 +186,26 @@ static inline int handle_ipv6(struct __sk_buff *skb, __u32 proxy_identity)
 		if (ep->flags & ENDPOINT_F_HOST)
 			return TC_ACT_OK;
 
-		return ipv6_local_delivery(skb, l3_off, l4_off, flowlabel, ip6, nexthdr, ep);
+		return ipv6_local_delivery(skb, l3_off, l4_off, secctx, ip6, nexthdr, ep, METRIC_INGRESS);
 	}
 
 #ifdef ENCAP_IFINDEX
 	dst = (union v6addr *) &ip6->daddr;
-	if (likely(ipv6_match_prefix_96(dst, &node_ip))) {
+	info = ipcache_lookup6(&IPCACHE_MAP, dst, V6_CACHE_KEY_LEN);
+	if (info != NULL && info->tunnel_endpoint != 0) {
+		int ret = encap_and_redirect_with_nodeid(skb, info->tunnel_endpoint,
+							 info->key,
+							 secctx, TRACE_PAYLOAD_LEN);
+
+		/* If IPSEC is needed recirc through ingress to use xfrm stack
+		 * and then result will routed back through bpf_netdev on egress
+		 * but with encrypt marks.
+		 */
+		if (ret == IPSEC_ENDPOINT)
+			return TC_ACT_OK;
+		else
+			return ret;
+	} else if (likely(ipv6_match_prefix_96(dst, &node_ip))) {
 		struct endpoint_key key = {};
 		int ret;
 
@@ -236,14 +217,51 @@ static inline int handle_ipv6(struct __sk_buff *skb, __u32 proxy_identity)
 		key.ip6.p4 = 0;
 		key.family = ENDPOINT_KEY_IPV6;
 
-		ret = encap_and_redirect(skb, &key, flowlabel);
-		if (ret != DROP_NO_TUNNEL_ENDPOINT)
+		ret = encap_and_redirect_netdev(skb, &key, secctx, TRACE_PAYLOAD_LEN);
+		if (ret == IPSEC_ENDPOINT)
+			return TC_ACT_OK;
+		else if (ret != DROP_NO_TUNNEL_ENDPOINT)
 			return ret;
 	}
 #endif
 
+	dst = (union v6addr *) &ip6->daddr;
+	info = ipcache_lookup6(&IPCACHE_MAP, dst, V6_CACHE_KEY_LEN);
+#ifdef FROM_HOST
+	if (info == NULL) {
+		/* We have received a packet for which no ipcache entry exists,
+		 * we do not know what to do with this packet, drop it. */
+		return DROP_UNROUTABLE;
+	}
+#endif
+#ifdef ENABLE_IPSEC
+	if (info && info->key && info->tunnel_endpoint) {
+		__u8 key = get_min_encrypt_key(info->key);
+
+		set_encrypt_key_cb(skb, key);
+#ifdef IP_POOLS
+		set_encrypt_dip(skb, info->tunnel_endpoint);
+#else
+		set_identity_cb(skb, secctx);
+#endif
+	}
+#endif
 	return TC_ACT_OK;
 }
+
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_FROM_LXC) int tail_handle_ipv6(struct __sk_buff *skb)
+{
+	__u32 proxy_identity = skb->cb[CB_SRC_IDENTITY];
+	int ret;
+
+	skb->cb[CB_SRC_IDENTITY] = 0;
+	ret = handle_ipv6(skb, proxy_identity);
+	if (IS_ERR(ret))
+		return send_drop_notify_error(skb, proxy_identity, ret, TC_ACT_SHOT, METRIC_INGRESS);
+
+	return ret;
+}
+#endif /* ENABLE_IPV6 */
 
 #ifdef ENABLE_IPV4
 static inline __u32 derive_ipv4_sec_ctx(struct __sk_buff *skb, struct iphdr *ip4)
@@ -251,83 +269,13 @@ static inline __u32 derive_ipv4_sec_ctx(struct __sk_buff *skb, struct iphdr *ip4
 #ifdef FIXED_SRC_SECCTX
 	return FIXED_SRC_SECCTX;
 #else
-	__u32 secctx = WORLD_ID;
-
-	if ((ip4->saddr & IPV4_CLUSTER_MASK) == IPV4_CLUSTER_RANGE) {
-		/* FIXME: Derive */
-	}
-	return secctx;
+	return WORLD_ID;
 #endif
 }
 
-#ifdef FROM_HOST
-static inline int __inline__
-reverse_proxy(struct __sk_buff *skb, int l4_off, struct iphdr *ip4,
-	      struct ipv4_ct_tuple *tuple)
+static inline int handle_ipv4(struct __sk_buff *skb, __u32 src_identity)
 {
-	struct proxy4_tbl_value *val;
-	struct proxy4_tbl_key key = {
-		.saddr = ip4->daddr,
-		.nexthdr = tuple->nexthdr,
-	};
-	__be32 new_saddr, old_saddr = ip4->saddr;
-	__be16 new_sport, old_sport;
-	struct csum_offset csum = {};
-
-	switch (tuple->nexthdr) {
-	case IPPROTO_TCP:
-	case IPPROTO_UDP:
-		/* load sport + dport in reverse order, sport=dport, dport=sport */
-		if (skb_load_bytes(skb, l4_off, &key.dport, 4) < 0)
-			return DROP_CT_INVALID_HDR;
-		break;
-	default:
-		/* ignore */
-		return 0;
-	}
-
-	csum_l4_offset_and_flags(tuple->nexthdr, &csum);
-
-	cilium_dbg3(skb, DBG_REV_PROXY_LOOKUP, key.sport << 16 | key.dport,
-		      key.saddr, key.nexthdr);
-
-	val = map_lookup_elem(&cilium_proxy4, &key);
-	if (!val)
-		return 0;
-
-	new_saddr = val->orig_daddr;
-	new_sport = val->orig_dport;
-	old_sport = key.dport;
-
-	cilium_dbg(skb, DBG_REV_PROXY_FOUND, new_saddr, bpf_ntohs(new_sport));
-	cilium_dbg_capture(skb, DBG_CAPTURE_PROXY_PRE, 0);
-
-	if (l4_modify_port(skb, l4_off, TCP_SPORT_OFF, &csum, new_sport, old_sport) < 0)
-		return DROP_WRITE_ERROR;
-
-	if (skb_store_bytes(skb, ETH_HLEN + offsetof(struct iphdr, saddr), &new_saddr, 4, 0) < 0)
-		return DROP_WRITE_ERROR;
-
-	if (l3_csum_replace(skb, ETH_HLEN + offsetof(struct iphdr, check), old_saddr, new_saddr, 4) < 0)
-		return DROP_CSUM_L3;
-
-	if (csum.offset &&
-	    csum_l4_replace(skb, l4_off, &csum, old_saddr, new_saddr, 4 | BPF_F_PSEUDO_HDR) < 0)
-		return DROP_CSUM_L4;
-
-	/* Packets which have been translated back from the proxy must
-	 * skip any potential ingress proxy at the endpoint
-	 */
-	skb->tc_index |= TC_INDEX_F_SKIP_PROXY;
-
-	cilium_dbg_capture(skb, DBG_CAPTURE_PROXY_POST, 0);
-
-	return 0;
-}
-#endif
-
-static inline int handle_ipv4(struct __sk_buff *skb, __u32 proxy_identity)
-{
+	struct remote_endpoint_info *info = NULL;
 	struct ipv4_ct_tuple tuple = {};
 	struct endpoint_info *ep;
 	void *data, *data_end;
@@ -338,25 +286,63 @@ static inline int handle_ipv4(struct __sk_buff *skb, __u32 proxy_identity)
 	if (!revalidate_data(skb, &data, &data_end, &ip4))
 		return DROP_INVALID;
 
+#ifdef ENABLE_NODEPORT
+	if (!bpf_skip_nodeport(skb)) {
+		int ret = nodeport_lb4(skb, src_identity);
+		if (ret < 0)
+			return ret;
+	}
+#if defined(ENCAP_IFINDEX) || defined(NO_REDIRECT)
+	/* We cannot redirect a packet to a local endpoint in the direct
+	 * routing mode, as the redirect bypasses nf_conntrack table.
+	 * This makes a second reply from the endpoint to be MASQUERADEd or
+	 * to be DROPed by k8s's "--ctstate INVALID -j DROP" depending via
+	 * which interface it was inputed. */
+	return TC_ACT_OK;
+#endif /* ENCAP_IFINDEX || NO_REDIRECT */
+	/* Verifier workaround: modified ctx access. */
+	if (!revalidate_data(skb, &data, &data_end, &ip4))
+		return DROP_INVALID;
+#endif /* ENABLE_NODEPORT */
+
 	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
 	secctx = derive_ipv4_sec_ctx(skb, ip4);
 	tuple.nexthdr = ip4->protocol;
 
+	/* Packets from the proxy will already have a real identity. */
+	if (identity_is_reserved(src_identity)) {
+		info = ipcache_lookup4(&IPCACHE_MAP, ip4->saddr, V4_CACHE_KEY_LEN);
+		if (info != NULL) {
+			__u32 sec_label = info->sec_label;
+			if (sec_label) {
+				/* When SNAT is enabled on traffic ingressing
+				 * into Cilium, all traffic from the world will
+				 * have a source IP of the host. It will only
+				 * actually be from the host if "src_identity"
+				 * (passed into this function) reports the src
+				 * as the host. So we can ignore the ipcache
+				 * if it reports the source as HOST_ID.
+				 */
+#ifndef ENABLE_EXTRA_HOST_DEV
+				if (sec_label != HOST_ID)
+#endif
+					src_identity = sec_label;
+			}
+		}
+		cilium_dbg(skb, info ? DBG_IP_ID_MAP_SUCCEED4 : DBG_IP_ID_MAP_FAILED4,
+			   ip4->saddr, src_identity);
+	}
+
+	secctx = finalize_sec_ctx(secctx, src_identity);
 #ifdef FROM_HOST
 	if (1) {
 		int ret;
 
-		if (proxy_identity)
-			secctx = proxy_identity;
-
-		ret = reverse_proxy(skb, l4_off, ip4, &tuple);
-		/* DIRECT PACKET READ INVALID */
-		if (IS_ERR(ret))
-			return ret;
+		secctx = src_identity;
 
 		/* If we are attached to cilium_host at egress, this will
 		 * rewrite the destination mac address to the MAC of cilium_net */
-		ret = rewrite_dmac_to_host(skb);
+		ret = rewrite_dmac_to_host(skb, secctx);
 		/* DIRECT PACKET READ INVALID */
 		if (IS_ERR(ret))
 			return ret;
@@ -371,14 +357,28 @@ static inline int handle_ipv4(struct __sk_buff *skb, __u32 proxy_identity)
 		/* Let through packets to the node-ip so they are
 		 * processed by the local ip stack */
 		if (ep->flags & ENDPOINT_F_HOST)
+#ifdef HOST_REDIRECT_TO_INGRESS
+			/* This is required for L7 proxy to send packets to the host. */
+			return redirect(HOST_IFINDEX, BPF_F_INGRESS);
+#else
 			return TC_ACT_OK;
+#endif
 
-		return ipv4_local_delivery(skb, ETH_HLEN, l4_off, secctx, ip4, ep);
+		return ipv4_local_delivery(skb, ETH_HLEN, l4_off, secctx, ip4, ep, METRIC_INGRESS);
 	}
 
 #ifdef ENCAP_IFINDEX
-	/* Check if destination is within our cluster prefix */
-	if ((ip4->daddr & IPV4_CLUSTER_MASK) == IPV4_CLUSTER_RANGE) {
+	info = ipcache_lookup4(&IPCACHE_MAP, ip4->daddr, V4_CACHE_KEY_LEN);
+	if (info != NULL && info->tunnel_endpoint != 0) {
+		int ret = encap_and_redirect_with_nodeid(skb, info->tunnel_endpoint,
+							 info->key,
+							 secctx, TRACE_PAYLOAD_LEN);
+
+		if (ret == IPSEC_ENDPOINT)
+			return TC_ACT_OK;
+		else
+			return ret;
+	} else {
 		/* IPv4 lookup key: daddr & IPV4_MASK */
 		struct endpoint_key key = {};
 		int ret;
@@ -387,77 +387,272 @@ static inline int handle_ipv4(struct __sk_buff *skb, __u32 proxy_identity)
 		key.family = ENDPOINT_KEY_IPV4;
 
 		cilium_dbg(skb, DBG_NETDEV_ENCAP4, key.ip4, secctx);
-		ret = encap_and_redirect(skb, &key, secctx);
-		if (ret != DROP_NO_TUNNEL_ENDPOINT)
+		ret = encap_and_redirect_netdev(skb, &key, secctx, TRACE_PAYLOAD_LEN);
+		if (ret == IPSEC_ENDPOINT)
+			return TC_ACT_OK;
+		else if (ret != DROP_NO_TUNNEL_ENDPOINT)
 			return ret;
 	}
 #endif
 
+#ifdef HOST_REDIRECT_TO_INGRESS
+    return redirect(HOST_IFINDEX, BPF_F_INGRESS);
+#else
+
+	info = ipcache_lookup4(&IPCACHE_MAP, ip4->daddr, V4_CACHE_KEY_LEN);
+#ifdef FROM_HOST
+	if (info == NULL) {
+		/* We have received a packet for which no ipcache entry exists,
+		 * we do not know what to do with this packet, drop it. */
+		return DROP_UNROUTABLE;
+	}
+#endif
+#ifdef ENABLE_IPSEC
+	if (info && info->key && info->tunnel_endpoint) {
+		__u8 key = get_min_encrypt_key(info->key);
+
+		set_encrypt_key_cb(skb, key);
+#ifdef IP_POOLS
+		set_encrypt_dip(skb, info->tunnel_endpoint);
+#else
+		set_identity_cb(skb, secctx);
+#endif
+	}
+#endif
 	return TC_ACT_OK;
+#endif
 }
 
-#define CB_SRC_IDENTITY 0
-
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4) int tail_handle_ipv4(struct __sk_buff *skb)
+__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_FROM_LXC) int tail_handle_ipv4(struct __sk_buff *skb)
 {
 	__u32 proxy_identity = skb->cb[CB_SRC_IDENTITY];
-	int ret = handle_ipv4(skb, proxy_identity);
+	int ret;
 
+	skb->cb[CB_SRC_IDENTITY] = 0;
+	ret = handle_ipv4(skb, proxy_identity);
 	if (IS_ERR(ret))
-		return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
+		return send_drop_notify_error(skb, proxy_identity, ret, TC_ACT_SHOT, METRIC_INGRESS);
 
 	return ret;
 }
 
+#endif /* ENABLE_IPV4 */
+
+#ifdef ENABLE_IPSEC
+#ifndef ENCAP_IFINDEX
+static __always_inline int do_netdev_encrypt_pools(struct __sk_buff *skb)
+{
+	int ret = 0;
+#ifdef IP_POOLS
+	__u32 tunnel_endpoint = 0;
+	void *data, *data_end;
+	__u32 tunnel_source = IPV4_ENCRYPT_IFACE;
+	struct iphdr *iphdr;
+	__be32 sum;
+
+	tunnel_endpoint = skb->cb[4];
+	skb->mark = 0;
+
+	if (!revalidate_data(skb, &data, &data_end, &iphdr)) {
+		ret = DROP_INVALID;
+		goto drop_err;
+	}
+
+	/* When IP_POOLS is enabled ip addresses are not
+	 * assigned on a per node basis so lacking node
+	 * affinity we can not use IP address to assign the
+	 * destination IP. Instead rewrite it here from cb[].
+	 */
+	sum = csum_diff(&iphdr->daddr, 4, &tunnel_endpoint, 4, 0);
+	if (skb_store_bytes(skb, ETH_HLEN + offsetof(struct iphdr, daddr),
+	    &tunnel_endpoint, 4, 0) < 0) {
+		ret = DROP_WRITE_ERROR;
+		goto drop_err;
+	}
+	if (l3_csum_replace(skb, ETH_HLEN + offsetof(struct iphdr, check),
+	    0, sum, 0) < 0) {
+		ret = DROP_CSUM_L3;
+		goto drop_err;
+	}
+
+	if (!revalidate_data(skb, &data, &data_end, &iphdr)) {
+		ret = DROP_INVALID;
+		goto drop_err;
+	}
+
+	sum = csum_diff(&iphdr->saddr, 4, &tunnel_source, 4, 0);
+	if (skb_store_bytes(skb, ETH_HLEN + offsetof(struct iphdr, saddr),
+	    &tunnel_source, 4, 0) < 0) {
+		ret = DROP_WRITE_ERROR;
+		goto drop_err;
+	}
+	if (l3_csum_replace(skb, ETH_HLEN + offsetof(struct iphdr, check),
+	    0, sum, 0) < 0) {
+		ret = DROP_CSUM_L3;
+		goto drop_err;
+	}
+drop_err:
+#endif // IP_POOLS
+	return ret;
+}
+
+static __always_inline int do_netdev_encrypt_fib(struct __sk_buff *skb, int *encrypt_iface)
+{
+	int ret = 0;
+
+#ifdef HAVE_FIB_LOOKUP
+	struct bpf_fib_lookup fib_params = {};
+	void *data, *data_end;
+	struct iphdr *iphdr;
+	__be32 sum;
+	int err;
+
+	if (!revalidate_data(skb, &data, &data_end, &iphdr)) {
+		ret = DROP_INVALID;
+		goto drop_err_fib;
+	}
+
+	fib_params.family = AF_INET;
+	fib_params.ifindex = ENCRYPT_IFACE;
+
+	fib_params.ipv4_src = iphdr->saddr;
+	fib_params.ipv4_dst = iphdr->daddr;
+
+	err = fib_lookup(skb, &fib_params, sizeof(fib_params),
+		    BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
+	if (err != 0) {
+		ret = DROP_NO_FIB;
+		goto drop_err_fib;
+	}
+	if (eth_store_daddr(skb, fib_params.dmac, 0) < 0) {
+		ret = DROP_WRITE_ERROR;
+		goto drop_err_fib;
+	}
+	if (eth_store_saddr(skb, fib_params.smac, 0) < 0) {
+		ret = DROP_WRITE_ERROR;
+		goto drop_err_fib;
+	}
+	*encrypt_iface = fib_params.ifindex;
+drop_err_fib:
+#endif /* HAVE_FIB_LOOKUP */
+	return ret;
+}
+
+static __always_inline int do_netdev_encrypt(struct __sk_buff *skb)
+{
+	int encrypt_iface;
+	int ret = 0;
+
+#ifdef ENCRYPT_NODE
+	encrypt_iface = ENCRYPT_IFACE;
 #endif
 
-__section("from-netdev")
-int from_netdev(struct __sk_buff *skb)
-{
-	__u32 proxy_identity = 0;
-	int ret;
+	ret = do_netdev_encrypt_pools(skb);
+	if (ret)
+		return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_INGRESS);
+
+	ret = do_netdev_encrypt_fib(skb, &encrypt_iface);
+	if (ret)
+		return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_INGRESS);
 
 	bpf_clear_cb(skb);
+#ifdef ENCRYPT_NODE
+	return redirect(encrypt_iface, 0);
+#else
+	return TC_ACT_OK;
+#endif
+}
+
+#else /* ENCAP_IFINDEX */
+static __always_inline int do_netdev_encrypt_encap(struct __sk_buff *skb)
+{
+	__u32 seclabel, tunnel_endpoint = 0;
+
+	seclabel = get_identity(skb);
+	tunnel_endpoint = skb->cb[4];
+	skb->mark = 0;
+
+	bpf_clear_cb(skb);
+	return __encap_and_redirect_with_nodeid(skb, tunnel_endpoint, seclabel, TRACE_PAYLOAD_LEN);
+}
+
+static __always_inline int do_netdev_encrypt(struct __sk_buff *skb)
+{
+	return do_netdev_encrypt_encap(skb);
+}
+#endif /* ENCAP_IFINDEX */
+#endif /* ENABLE_IPSEC */
+
+static __always_inline int do_netdev(struct __sk_buff *skb, __u16 proto)
+{
+	__u32 identity = 0;
+	int ret;
+
+#ifdef ENABLE_IPSEC
+	if (1) {
+		__u32 magic = skb->mark & MARK_MAGIC_HOST_MASK;
+
+		if (magic == MARK_MAGIC_ENCRYPT)
+			return do_netdev_encrypt(skb);
+	}
+#endif
+	bpf_clear_cb(skb);
+	bpf_clear_nodeport(skb);
+
+#ifdef ENABLE_NODEPORT
+	ret = nodeport_nat_rev(skb, false);
+	if (IS_ERR(ret) &&
+	    ret != DROP_NAT_NO_MAPPING &&
+	    ret != DROP_NAT_UNSUPP_PROTO)
+		return send_drop_notify_error(skb, identity, ret,
+					      TC_ACT_OK, METRIC_INGRESS);
+#endif
 
 #ifdef FROM_HOST
 	if (1) {
-		int report_identity, trace = TRACE_FROM_HOST;
 
-		handle_identity_from_proxy(skb, &proxy_identity);
-		if (proxy_identity) {
-			trace = TRACE_FROM_PROXY;
-			report_identity = proxy_identity;
-		} else {
-			report_identity = HOST_ID;
-		}
-
-		send_trace_notify(skb, trace, report_identity, 0, 0, skb->ingress_ifindex, 0);
+#ifdef HOST_REDIRECT_TO_INGRESS
+	if (proto == bpf_htons(ETH_P_ARP)) {
+		union macaddr mac = HOST_IFINDEX_MAC;
+		return arp_respond(skb, &mac, BPF_F_INGRESS);
 	}
-#else
-	send_trace_notify(skb, TRACE_FROM_STACK, 0, 0, 0, skb->ingress_ifindex, 0);
 #endif
 
-	switch (skb->protocol) {
-	case bpf_htons(ETH_P_IPV6):
-		/* This is considered the fast path, no tail call */
-		ret = handle_ipv6(skb, proxy_identity);
+		int trace = TRACE_FROM_HOST;
+		bool from_proxy;
 
-		/* We should only be seeing an error here for packets which have
-		 * been targetting an endpoint managed by us. */
-		if (IS_ERR(ret))
-			return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
-		break;
+		from_proxy = inherit_identity_from_host(skb, &identity);
+		if (from_proxy)
+			trace = TRACE_FROM_PROXY;
+		send_trace_notify(skb, trace, identity, 0, 0,
+				  skb->ingress_ifindex, 0, TRACE_PAYLOAD_LEN);
+	}
+#else
+	send_trace_notify(skb, TRACE_FROM_STACK, 0, 0, 0, skb->ingress_ifindex,
+			  0, TRACE_PAYLOAD_LEN);
+#endif
+
+	switch (proto) {
+#ifdef ENABLE_IPV6
+	case bpf_htons(ETH_P_IPV6):
+		skb->cb[CB_SRC_IDENTITY] = identity;
+		ep_tail_call(skb, CILIUM_CALL_IPV6_FROM_LXC);
+		/* See comment below for IPv4. */
+		return send_drop_notify_error(skb, identity, DROP_MISSED_TAIL_CALL,
+					      TC_ACT_OK, METRIC_INGRESS);
+#endif
 
 #ifdef ENABLE_IPV4
 	case bpf_htons(ETH_P_IP):
-		skb->cb[CB_SRC_IDENTITY] = proxy_identity;
-		ep_tail_call(skb, CILIUM_CALL_IPV4);
+		skb->cb[CB_SRC_IDENTITY] = identity;
+		ep_tail_call(skb, CILIUM_CALL_IPV4_FROM_LXC);
 		/* We are not returning an error here to always allow traffic to
 		 * the stack in case maps have become unavailable.
 		 *
 		 * Note: Since drop notification requires a tail call as well,
 		 * this notification is unlikely to succeed. */
-		return send_drop_notify_error(skb, DROP_MISSED_TAIL_CALL, TC_ACT_OK);
+		return send_drop_notify_error(skb, identity, DROP_MISSED_TAIL_CALL,
+		                              TC_ACT_OK, METRIC_INGRESS);
 #endif
 
 	default:
@@ -468,31 +663,54 @@ int from_netdev(struct __sk_buff *skb)
 	return ret;
 }
 
-struct bpf_elf_map __section_maps POLICY_MAP = {
-	.type		= BPF_MAP_TYPE_HASH,
-	.size_key	= sizeof(__u32),
-	.size_value	= sizeof(struct policy_entry),
-	.pinning	= PIN_GLOBAL_NS,
-	.max_elem	= 1024,
-};
-
-__section_tail(CILIUM_MAP_RES_POLICY, SECLABEL) int handle_policy(struct __sk_buff *skb)
+__section("from-netdev")
+int from_netdev(struct __sk_buff *skb)
 {
-	__u32 src_label = skb->cb[CB_SRC_LABEL];
-	int ifindex = skb->cb[CB_IFINDEX];
+	int ret = ret;
+	__u16 proto;
 
-	if (policy_can_access(&POLICY_MAP, skb, src_label, 0, 0, 0, NULL) != TC_ACT_OK) {
-		return send_drop_notify(skb, src_label, SECLABEL, 0, ifindex,
-					DROP_POLICY, TC_ACT_SHOT);
-	} else {
-		cilium_dbg_capture(skb, DBG_CAPTURE_DELIVERY, ifindex);
+	if (!validate_ethertype(skb, &proto))
+		/* Pass unknown traffic to the stack */
+		return TC_ACT_OK;
 
-		/* ifindex 0 indicates passing down to the stack */
-		if (ifindex == 0)
-			return TC_ACT_OK;
-		else
-			return redirect(ifindex, 0);
+#ifdef ENABLE_MASQUERADE
+	cilium_dbg_capture(skb, DBG_CAPTURE_SNAT_PRE, skb->ifindex);
+	ret = snat_process(skb, BPF_PKT_DIR);
+	if (ret != TC_ACT_OK) {
+		return ret;
 	}
+	cilium_dbg_capture(skb, DBG_CAPTURE_SNAT_POST, skb->ifindex);
+#endif /* ENABLE_MASQUERADE */
+
+	return do_netdev(skb, proto);
+}
+
+__section("to-netdev")
+int to_netdev(struct __sk_buff *skb)
+{
+	/* Cannot compile the section out entriely, test/bpf/verifier-test.sh
+	 * workaround.
+	 */
+	int ret = TC_ACT_OK;
+#if defined(ENABLE_NODEPORT) || defined(ENABLE_MASQUERADE)
+#ifdef ENABLE_NODEPORT
+	if ((skb->mark & MARK_MAGIC_SNAT_DONE) == MARK_MAGIC_SNAT_DONE)
+		return TC_ACT_OK;
+	ret = nodeport_nat_fwd(skb, false);
+	if (IS_ERR(ret))
+		return send_drop_notify_error(skb, 0, ret, TC_ACT_SHOT, METRIC_EGRESS);
+#else
+	__u16 proto;
+	if (!validate_ethertype(skb, &proto))
+		/* Pass unknown traffic to the stack */
+		return TC_ACT_OK;
+	cilium_dbg_capture(skb, DBG_CAPTURE_SNAT_PRE, skb->ifindex);
+	ret = snat_process(skb, BPF_PKT_DIR);
+	if (!ret)
+		cilium_dbg_capture(skb, DBG_CAPTURE_SNAT_POST, skb->ifindex);
+#endif /* ENABLE_NODEPORT */
+#endif /* ENABLE_NODEPORT || ENABLE_MASQUERADE */
+	return ret;
 }
 
 BPF_LICENSE("GPL");

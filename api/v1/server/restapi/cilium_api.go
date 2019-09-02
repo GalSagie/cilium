@@ -22,6 +22,7 @@ import (
 	"github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/api/v1/server/restapi/ipam"
+	"github.com/cilium/cilium/api/v1/server/restapi/metrics"
 	"github.com/cilium/cilium/api/v1/server/restapi/policy"
 	"github.com/cilium/cilium/api/v1/server/restapi/prefilter"
 	"github.com/cilium/cilium/api/v1/server/restapi/service"
@@ -34,6 +35,8 @@ func NewCiliumAPI(spec *loads.Document) *CiliumAPI {
 		formats:             strfmt.Default,
 		defaultConsumes:     "application/json",
 		defaultProduces:     "application/json",
+		customConsumers:     make(map[string]runtime.Consumer),
+		customProducers:     make(map[string]runtime.Producer),
 		ServerShutdown:      func() {},
 		spec:                spec,
 		ServeError:          errors.ServeError,
@@ -45,17 +48,20 @@ func NewCiliumAPI(spec *loads.Document) *CiliumAPI {
 		EndpointDeleteEndpointIDHandler: endpoint.DeleteEndpointIDHandlerFunc(func(params endpoint.DeleteEndpointIDParams) middleware.Responder {
 			return middleware.NotImplemented("operation EndpointDeleteEndpointID has not yet been implemented")
 		}),
+		PolicyDeleteFqdnCacheHandler: policy.DeleteFqdnCacheHandlerFunc(func(params policy.DeleteFqdnCacheParams) middleware.Responder {
+			return middleware.NotImplemented("operation PolicyDeleteFqdnCache has not yet been implemented")
+		}),
 		IPAMDeleteIPAMIPHandler: ipam.DeleteIPAMIPHandlerFunc(func(params ipam.DeleteIPAMIPParams) middleware.Responder {
 			return middleware.NotImplemented("operation IPAMDeleteIPAMIP has not yet been implemented")
 		}),
 		PolicyDeletePolicyHandler: policy.DeletePolicyHandlerFunc(func(params policy.DeletePolicyParams) middleware.Responder {
 			return middleware.NotImplemented("operation PolicyDeletePolicy has not yet been implemented")
 		}),
-		PrefilterDeletePrefilterHandler: prefilter.DeletePrefilterHandlerFunc(func(params prefilter.DeletePrefilterParams) middleware.Responder {
-			return middleware.NotImplemented("operation PrefilterDeletePrefilter has not yet been implemented")
-		}),
 		ServiceDeleteServiceIDHandler: service.DeleteServiceIDHandlerFunc(func(params service.DeleteServiceIDParams) middleware.Responder {
 			return middleware.NotImplemented("operation ServiceDeleteServiceID has not yet been implemented")
+		}),
+		DaemonGetClusterNodesHandler: daemon.GetClusterNodesHandlerFunc(func(params daemon.GetClusterNodesParams) middleware.Responder {
+			return middleware.NotImplemented("operation DaemonGetClusterNodes has not yet been implemented")
 		}),
 		DaemonGetConfigHandler: daemon.GetConfigHandlerFunc(func(params daemon.GetConfigParams) middleware.Responder {
 			return middleware.NotImplemented("operation DaemonGetConfig has not yet been implemented")
@@ -81,20 +87,41 @@ func NewCiliumAPI(spec *loads.Document) *CiliumAPI {
 		EndpointGetEndpointIDLogHandler: endpoint.GetEndpointIDLogHandlerFunc(func(params endpoint.GetEndpointIDLogParams) middleware.Responder {
 			return middleware.NotImplemented("operation EndpointGetEndpointIDLog has not yet been implemented")
 		}),
+		PolicyGetFqdnCacheHandler: policy.GetFqdnCacheHandlerFunc(func(params policy.GetFqdnCacheParams) middleware.Responder {
+			return middleware.NotImplemented("operation PolicyGetFqdnCache has not yet been implemented")
+		}),
+		PolicyGetFqdnCacheIDHandler: policy.GetFqdnCacheIDHandlerFunc(func(params policy.GetFqdnCacheIDParams) middleware.Responder {
+			return middleware.NotImplemented("operation PolicyGetFqdnCacheID has not yet been implemented")
+		}),
 		DaemonGetHealthzHandler: daemon.GetHealthzHandlerFunc(func(params daemon.GetHealthzParams) middleware.Responder {
 			return middleware.NotImplemented("operation DaemonGetHealthz has not yet been implemented")
 		}),
 		PolicyGetIdentityHandler: policy.GetIdentityHandlerFunc(func(params policy.GetIdentityParams) middleware.Responder {
 			return middleware.NotImplemented("operation PolicyGetIdentity has not yet been implemented")
 		}),
+		PolicyGetIdentityEndpointsHandler: policy.GetIdentityEndpointsHandlerFunc(func(params policy.GetIdentityEndpointsParams) middleware.Responder {
+			return middleware.NotImplemented("operation PolicyGetIdentityEndpoints has not yet been implemented")
+		}),
 		PolicyGetIdentityIDHandler: policy.GetIdentityIDHandlerFunc(func(params policy.GetIdentityIDParams) middleware.Responder {
 			return middleware.NotImplemented("operation PolicyGetIdentityID has not yet been implemented")
+		}),
+		DaemonGetMapHandler: daemon.GetMapHandlerFunc(func(params daemon.GetMapParams) middleware.Responder {
+			return middleware.NotImplemented("operation DaemonGetMap has not yet been implemented")
+		}),
+		DaemonGetMapNameHandler: daemon.GetMapNameHandlerFunc(func(params daemon.GetMapNameParams) middleware.Responder {
+			return middleware.NotImplemented("operation DaemonGetMapName has not yet been implemented")
+		}),
+		MetricsGetMetricsHandler: metrics.GetMetricsHandlerFunc(func(params metrics.GetMetricsParams) middleware.Responder {
+			return middleware.NotImplemented("operation MetricsGetMetrics has not yet been implemented")
 		}),
 		PolicyGetPolicyHandler: policy.GetPolicyHandlerFunc(func(params policy.GetPolicyParams) middleware.Responder {
 			return middleware.NotImplemented("operation PolicyGetPolicy has not yet been implemented")
 		}),
 		PolicyGetPolicyResolveHandler: policy.GetPolicyResolveHandlerFunc(func(params policy.GetPolicyResolveParams) middleware.Responder {
 			return middleware.NotImplemented("operation PolicyGetPolicyResolve has not yet been implemented")
+		}),
+		PolicyGetPolicySelectorsHandler: policy.GetPolicySelectorsHandlerFunc(func(params policy.GetPolicySelectorsParams) middleware.Responder {
+			return middleware.NotImplemented("operation PolicyGetPolicySelectors has not yet been implemented")
 		}),
 		PrefilterGetPrefilterHandler: prefilter.GetPrefilterHandlerFunc(func(params prefilter.GetPrefilterParams) middleware.Responder {
 			return middleware.NotImplemented("operation PrefilterGetPrefilter has not yet been implemented")
@@ -114,6 +141,12 @@ func NewCiliumAPI(spec *loads.Document) *CiliumAPI {
 		EndpointPatchEndpointIDConfigHandler: endpoint.PatchEndpointIDConfigHandlerFunc(func(params endpoint.PatchEndpointIDConfigParams) middleware.Responder {
 			return middleware.NotImplemented("operation EndpointPatchEndpointIDConfig has not yet been implemented")
 		}),
+		EndpointPatchEndpointIDLabelsHandler: endpoint.PatchEndpointIDLabelsHandlerFunc(func(params endpoint.PatchEndpointIDLabelsParams) middleware.Responder {
+			return middleware.NotImplemented("operation EndpointPatchEndpointIDLabels has not yet been implemented")
+		}),
+		PrefilterPatchPrefilterHandler: prefilter.PatchPrefilterHandlerFunc(func(params prefilter.PatchPrefilterParams) middleware.Responder {
+			return middleware.NotImplemented("operation PrefilterPatchPrefilter has not yet been implemented")
+		}),
 		IPAMPostIPAMHandler: ipam.PostIPAMHandlerFunc(func(params ipam.PostIPAMParams) middleware.Responder {
 			return middleware.NotImplemented("operation IPAMPostIPAM has not yet been implemented")
 		}),
@@ -123,14 +156,8 @@ func NewCiliumAPI(spec *loads.Document) *CiliumAPI {
 		EndpointPutEndpointIDHandler: endpoint.PutEndpointIDHandlerFunc(func(params endpoint.PutEndpointIDParams) middleware.Responder {
 			return middleware.NotImplemented("operation EndpointPutEndpointID has not yet been implemented")
 		}),
-		EndpointPutEndpointIDLabelsHandler: endpoint.PutEndpointIDLabelsHandlerFunc(func(params endpoint.PutEndpointIDLabelsParams) middleware.Responder {
-			return middleware.NotImplemented("operation EndpointPutEndpointIDLabels has not yet been implemented")
-		}),
 		PolicyPutPolicyHandler: policy.PutPolicyHandlerFunc(func(params policy.PutPolicyParams) middleware.Responder {
 			return middleware.NotImplemented("operation PolicyPutPolicy has not yet been implemented")
-		}),
-		PrefilterPutPrefilterHandler: prefilter.PutPrefilterHandlerFunc(func(params prefilter.PutPrefilterParams) middleware.Responder {
-			return middleware.NotImplemented("operation PrefilterPutPrefilter has not yet been implemented")
 		}),
 		ServicePutServiceIDHandler: service.PutServiceIDHandlerFunc(func(params service.PutServiceIDParams) middleware.Responder {
 			return middleware.NotImplemented("operation ServicePutServiceID has not yet been implemented")
@@ -144,18 +171,20 @@ type CiliumAPI struct {
 	context         *middleware.Context
 	handlers        map[string]map[string]http.Handler
 	formats         strfmt.Registry
+	customConsumers map[string]runtime.Consumer
+	customProducers map[string]runtime.Producer
 	defaultConsumes string
 	defaultProduces string
 	Middleware      func(middleware.Builder) http.Handler
 
 	// BasicAuthenticator generates a runtime.Authenticator from the supplied basic auth function.
-	// It has a default implemention in the security package, however you can replace it for your particular usage.
+	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	BasicAuthenticator func(security.UserPassAuthentication) runtime.Authenticator
 	// APIKeyAuthenticator generates a runtime.Authenticator from the supplied token auth function.
-	// It has a default implemention in the security package, however you can replace it for your particular usage.
+	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	APIKeyAuthenticator func(string, string, security.TokenAuthentication) runtime.Authenticator
 	// BearerAuthenticator generates a runtime.Authenticator from the supplied bearer token auth function.
-	// It has a default implemention in the security package, however you can replace it for your particular usage.
+	// It has a default implementation in the security package, however you can replace it for your particular usage.
 	BearerAuthenticator func(string, security.ScopedTokenAuthentication) runtime.Authenticator
 
 	// JSONConsumer registers a consumer for a "application/json" mime type
@@ -166,14 +195,16 @@ type CiliumAPI struct {
 
 	// EndpointDeleteEndpointIDHandler sets the operation handler for the delete endpoint ID operation
 	EndpointDeleteEndpointIDHandler endpoint.DeleteEndpointIDHandler
+	// PolicyDeleteFqdnCacheHandler sets the operation handler for the delete fqdn cache operation
+	PolicyDeleteFqdnCacheHandler policy.DeleteFqdnCacheHandler
 	// IPAMDeleteIPAMIPHandler sets the operation handler for the delete IP a m IP operation
 	IPAMDeleteIPAMIPHandler ipam.DeleteIPAMIPHandler
 	// PolicyDeletePolicyHandler sets the operation handler for the delete policy operation
 	PolicyDeletePolicyHandler policy.DeletePolicyHandler
-	// PrefilterDeletePrefilterHandler sets the operation handler for the delete prefilter operation
-	PrefilterDeletePrefilterHandler prefilter.DeletePrefilterHandler
 	// ServiceDeleteServiceIDHandler sets the operation handler for the delete service ID operation
 	ServiceDeleteServiceIDHandler service.DeleteServiceIDHandler
+	// DaemonGetClusterNodesHandler sets the operation handler for the get cluster nodes operation
+	DaemonGetClusterNodesHandler daemon.GetClusterNodesHandler
 	// DaemonGetConfigHandler sets the operation handler for the get config operation
 	DaemonGetConfigHandler daemon.GetConfigHandler
 	// DaemonGetDebuginfoHandler sets the operation handler for the get debuginfo operation
@@ -190,16 +221,30 @@ type CiliumAPI struct {
 	EndpointGetEndpointIDLabelsHandler endpoint.GetEndpointIDLabelsHandler
 	// EndpointGetEndpointIDLogHandler sets the operation handler for the get endpoint ID log operation
 	EndpointGetEndpointIDLogHandler endpoint.GetEndpointIDLogHandler
+	// PolicyGetFqdnCacheHandler sets the operation handler for the get fqdn cache operation
+	PolicyGetFqdnCacheHandler policy.GetFqdnCacheHandler
+	// PolicyGetFqdnCacheIDHandler sets the operation handler for the get fqdn cache ID operation
+	PolicyGetFqdnCacheIDHandler policy.GetFqdnCacheIDHandler
 	// DaemonGetHealthzHandler sets the operation handler for the get healthz operation
 	DaemonGetHealthzHandler daemon.GetHealthzHandler
 	// PolicyGetIdentityHandler sets the operation handler for the get identity operation
 	PolicyGetIdentityHandler policy.GetIdentityHandler
+	// PolicyGetIdentityEndpointsHandler sets the operation handler for the get identity endpoints operation
+	PolicyGetIdentityEndpointsHandler policy.GetIdentityEndpointsHandler
 	// PolicyGetIdentityIDHandler sets the operation handler for the get identity ID operation
 	PolicyGetIdentityIDHandler policy.GetIdentityIDHandler
+	// DaemonGetMapHandler sets the operation handler for the get map operation
+	DaemonGetMapHandler daemon.GetMapHandler
+	// DaemonGetMapNameHandler sets the operation handler for the get map name operation
+	DaemonGetMapNameHandler daemon.GetMapNameHandler
+	// MetricsGetMetricsHandler sets the operation handler for the get metrics operation
+	MetricsGetMetricsHandler metrics.GetMetricsHandler
 	// PolicyGetPolicyHandler sets the operation handler for the get policy operation
 	PolicyGetPolicyHandler policy.GetPolicyHandler
 	// PolicyGetPolicyResolveHandler sets the operation handler for the get policy resolve operation
 	PolicyGetPolicyResolveHandler policy.GetPolicyResolveHandler
+	// PolicyGetPolicySelectorsHandler sets the operation handler for the get policy selectors operation
+	PolicyGetPolicySelectorsHandler policy.GetPolicySelectorsHandler
 	// PrefilterGetPrefilterHandler sets the operation handler for the get prefilter operation
 	PrefilterGetPrefilterHandler prefilter.GetPrefilterHandler
 	// ServiceGetServiceHandler sets the operation handler for the get service operation
@@ -212,18 +257,18 @@ type CiliumAPI struct {
 	EndpointPatchEndpointIDHandler endpoint.PatchEndpointIDHandler
 	// EndpointPatchEndpointIDConfigHandler sets the operation handler for the patch endpoint ID config operation
 	EndpointPatchEndpointIDConfigHandler endpoint.PatchEndpointIDConfigHandler
+	// EndpointPatchEndpointIDLabelsHandler sets the operation handler for the patch endpoint ID labels operation
+	EndpointPatchEndpointIDLabelsHandler endpoint.PatchEndpointIDLabelsHandler
+	// PrefilterPatchPrefilterHandler sets the operation handler for the patch prefilter operation
+	PrefilterPatchPrefilterHandler prefilter.PatchPrefilterHandler
 	// IPAMPostIPAMHandler sets the operation handler for the post IP a m operation
 	IPAMPostIPAMHandler ipam.PostIPAMHandler
 	// IPAMPostIPAMIPHandler sets the operation handler for the post IP a m IP operation
 	IPAMPostIPAMIPHandler ipam.PostIPAMIPHandler
 	// EndpointPutEndpointIDHandler sets the operation handler for the put endpoint ID operation
 	EndpointPutEndpointIDHandler endpoint.PutEndpointIDHandler
-	// EndpointPutEndpointIDLabelsHandler sets the operation handler for the put endpoint ID labels operation
-	EndpointPutEndpointIDLabelsHandler endpoint.PutEndpointIDLabelsHandler
 	// PolicyPutPolicyHandler sets the operation handler for the put policy operation
 	PolicyPutPolicyHandler policy.PutPolicyHandler
-	// PrefilterPutPrefilterHandler sets the operation handler for the put prefilter operation
-	PrefilterPutPrefilterHandler prefilter.PutPrefilterHandler
 	// ServicePutServiceIDHandler sets the operation handler for the put service ID operation
 	ServicePutServiceIDHandler service.PutServiceIDHandler
 
@@ -293,6 +338,10 @@ func (o *CiliumAPI) Validate() error {
 		unregistered = append(unregistered, "endpoint.DeleteEndpointIDHandler")
 	}
 
+	if o.PolicyDeleteFqdnCacheHandler == nil {
+		unregistered = append(unregistered, "policy.DeleteFqdnCacheHandler")
+	}
+
 	if o.IPAMDeleteIPAMIPHandler == nil {
 		unregistered = append(unregistered, "ipam.DeleteIPAMIPHandler")
 	}
@@ -301,12 +350,12 @@ func (o *CiliumAPI) Validate() error {
 		unregistered = append(unregistered, "policy.DeletePolicyHandler")
 	}
 
-	if o.PrefilterDeletePrefilterHandler == nil {
-		unregistered = append(unregistered, "prefilter.DeletePrefilterHandler")
-	}
-
 	if o.ServiceDeleteServiceIDHandler == nil {
 		unregistered = append(unregistered, "service.DeleteServiceIDHandler")
+	}
+
+	if o.DaemonGetClusterNodesHandler == nil {
+		unregistered = append(unregistered, "daemon.GetClusterNodesHandler")
 	}
 
 	if o.DaemonGetConfigHandler == nil {
@@ -341,6 +390,14 @@ func (o *CiliumAPI) Validate() error {
 		unregistered = append(unregistered, "endpoint.GetEndpointIDLogHandler")
 	}
 
+	if o.PolicyGetFqdnCacheHandler == nil {
+		unregistered = append(unregistered, "policy.GetFqdnCacheHandler")
+	}
+
+	if o.PolicyGetFqdnCacheIDHandler == nil {
+		unregistered = append(unregistered, "policy.GetFqdnCacheIDHandler")
+	}
+
 	if o.DaemonGetHealthzHandler == nil {
 		unregistered = append(unregistered, "daemon.GetHealthzHandler")
 	}
@@ -349,8 +406,24 @@ func (o *CiliumAPI) Validate() error {
 		unregistered = append(unregistered, "policy.GetIdentityHandler")
 	}
 
+	if o.PolicyGetIdentityEndpointsHandler == nil {
+		unregistered = append(unregistered, "policy.GetIdentityEndpointsHandler")
+	}
+
 	if o.PolicyGetIdentityIDHandler == nil {
 		unregistered = append(unregistered, "policy.GetIdentityIDHandler")
+	}
+
+	if o.DaemonGetMapHandler == nil {
+		unregistered = append(unregistered, "daemon.GetMapHandler")
+	}
+
+	if o.DaemonGetMapNameHandler == nil {
+		unregistered = append(unregistered, "daemon.GetMapNameHandler")
+	}
+
+	if o.MetricsGetMetricsHandler == nil {
+		unregistered = append(unregistered, "metrics.GetMetricsHandler")
 	}
 
 	if o.PolicyGetPolicyHandler == nil {
@@ -359,6 +432,10 @@ func (o *CiliumAPI) Validate() error {
 
 	if o.PolicyGetPolicyResolveHandler == nil {
 		unregistered = append(unregistered, "policy.GetPolicyResolveHandler")
+	}
+
+	if o.PolicyGetPolicySelectorsHandler == nil {
+		unregistered = append(unregistered, "policy.GetPolicySelectorsHandler")
 	}
 
 	if o.PrefilterGetPrefilterHandler == nil {
@@ -385,6 +462,14 @@ func (o *CiliumAPI) Validate() error {
 		unregistered = append(unregistered, "endpoint.PatchEndpointIDConfigHandler")
 	}
 
+	if o.EndpointPatchEndpointIDLabelsHandler == nil {
+		unregistered = append(unregistered, "endpoint.PatchEndpointIDLabelsHandler")
+	}
+
+	if o.PrefilterPatchPrefilterHandler == nil {
+		unregistered = append(unregistered, "prefilter.PatchPrefilterHandler")
+	}
+
 	if o.IPAMPostIPAMHandler == nil {
 		unregistered = append(unregistered, "ipam.PostIPAMHandler")
 	}
@@ -397,16 +482,8 @@ func (o *CiliumAPI) Validate() error {
 		unregistered = append(unregistered, "endpoint.PutEndpointIDHandler")
 	}
 
-	if o.EndpointPutEndpointIDLabelsHandler == nil {
-		unregistered = append(unregistered, "endpoint.PutEndpointIDLabelsHandler")
-	}
-
 	if o.PolicyPutPolicyHandler == nil {
 		unregistered = append(unregistered, "policy.PutPolicyHandler")
-	}
-
-	if o.PrefilterPutPrefilterHandler == nil {
-		unregistered = append(unregistered, "prefilter.PutPrefilterHandler")
 	}
 
 	if o.ServicePutServiceIDHandler == nil {
@@ -450,6 +527,10 @@ func (o *CiliumAPI) ConsumersFor(mediaTypes []string) map[string]runtime.Consume
 			result["application/json"] = o.JSONConsumer
 
 		}
+
+		if c, ok := o.customConsumers[mt]; ok {
+			result[mt] = c
+		}
 	}
 	return result
 
@@ -465,6 +546,10 @@ func (o *CiliumAPI) ProducersFor(mediaTypes []string) map[string]runtime.Produce
 		case "application/json":
 			result["application/json"] = o.JSONProducer
 
+		}
+
+		if p, ok := o.customProducers[mt]; ok {
+			result[mt] = p
 		}
 	}
 	return result
@@ -511,6 +596,11 @@ func (o *CiliumAPI) initHandlerCache() {
 	if o.handlers["DELETE"] == nil {
 		o.handlers["DELETE"] = make(map[string]http.Handler)
 	}
+	o.handlers["DELETE"]["/fqdn/cache"] = policy.NewDeleteFqdnCache(o.context, o.PolicyDeleteFqdnCacheHandler)
+
+	if o.handlers["DELETE"] == nil {
+		o.handlers["DELETE"] = make(map[string]http.Handler)
+	}
 	o.handlers["DELETE"]["/ipam/{ip}"] = ipam.NewDeleteIPAMIP(o.context, o.IPAMDeleteIPAMIPHandler)
 
 	if o.handlers["DELETE"] == nil {
@@ -521,12 +611,12 @@ func (o *CiliumAPI) initHandlerCache() {
 	if o.handlers["DELETE"] == nil {
 		o.handlers["DELETE"] = make(map[string]http.Handler)
 	}
-	o.handlers["DELETE"]["/prefilter"] = prefilter.NewDeletePrefilter(o.context, o.PrefilterDeletePrefilterHandler)
-
-	if o.handlers["DELETE"] == nil {
-		o.handlers["DELETE"] = make(map[string]http.Handler)
-	}
 	o.handlers["DELETE"]["/service/{id}"] = service.NewDeleteServiceID(o.context, o.ServiceDeleteServiceIDHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/cluster/nodes"] = daemon.NewGetClusterNodes(o.context, o.DaemonGetClusterNodesHandler)
 
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
@@ -571,6 +661,16 @@ func (o *CiliumAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
+	o.handlers["GET"]["/fqdn/cache"] = policy.NewGetFqdnCache(o.context, o.PolicyGetFqdnCacheHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/fqdn/cache/{id}"] = policy.NewGetFqdnCacheID(o.context, o.PolicyGetFqdnCacheIDHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
 	o.handlers["GET"]["/healthz"] = daemon.NewGetHealthz(o.context, o.DaemonGetHealthzHandler)
 
 	if o.handlers["GET"] == nil {
@@ -581,7 +681,27 @@ func (o *CiliumAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
+	o.handlers["GET"]["/identity/endpoints"] = policy.NewGetIdentityEndpoints(o.context, o.PolicyGetIdentityEndpointsHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
 	o.handlers["GET"]["/identity/{id}"] = policy.NewGetIdentityID(o.context, o.PolicyGetIdentityIDHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/map"] = daemon.NewGetMap(o.context, o.DaemonGetMapHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/map/{name}"] = daemon.NewGetMapName(o.context, o.DaemonGetMapNameHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/metrics"] = metrics.NewGetMetrics(o.context, o.MetricsGetMetricsHandler)
 
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
@@ -592,6 +712,11 @@ func (o *CiliumAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/policy/resolve"] = policy.NewGetPolicyResolve(o.context, o.PolicyGetPolicyResolveHandler)
+
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/policy/selectors"] = policy.NewGetPolicySelectors(o.context, o.PolicyGetPolicySelectorsHandler)
 
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
@@ -623,6 +748,16 @@ func (o *CiliumAPI) initHandlerCache() {
 	}
 	o.handlers["PATCH"]["/endpoint/{id}/config"] = endpoint.NewPatchEndpointIDConfig(o.context, o.EndpointPatchEndpointIDConfigHandler)
 
+	if o.handlers["PATCH"] == nil {
+		o.handlers["PATCH"] = make(map[string]http.Handler)
+	}
+	o.handlers["PATCH"]["/endpoint/{id}/labels"] = endpoint.NewPatchEndpointIDLabels(o.context, o.EndpointPatchEndpointIDLabelsHandler)
+
+	if o.handlers["PATCH"] == nil {
+		o.handlers["PATCH"] = make(map[string]http.Handler)
+	}
+	o.handlers["PATCH"]["/prefilter"] = prefilter.NewPatchPrefilter(o.context, o.PrefilterPatchPrefilterHandler)
+
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}
@@ -641,17 +776,7 @@ func (o *CiliumAPI) initHandlerCache() {
 	if o.handlers["PUT"] == nil {
 		o.handlers["PUT"] = make(map[string]http.Handler)
 	}
-	o.handlers["PUT"]["/endpoint/{id}/labels"] = endpoint.NewPutEndpointIDLabels(o.context, o.EndpointPutEndpointIDLabelsHandler)
-
-	if o.handlers["PUT"] == nil {
-		o.handlers["PUT"] = make(map[string]http.Handler)
-	}
 	o.handlers["PUT"]["/policy"] = policy.NewPutPolicy(o.context, o.PolicyPutPolicyHandler)
-
-	if o.handlers["PUT"] == nil {
-		o.handlers["PUT"] = make(map[string]http.Handler)
-	}
-	o.handlers["PUT"]["/prefilter"] = prefilter.NewPutPrefilter(o.context, o.PrefilterPutPrefilterHandler)
 
 	if o.handlers["PUT"] == nil {
 		o.handlers["PUT"] = make(map[string]http.Handler)
@@ -671,9 +796,19 @@ func (o *CiliumAPI) Serve(builder middleware.Builder) http.Handler {
 	return o.context.APIHandler(builder)
 }
 
-// Init allows you to just initialize the handler cache, you can then recompose the middelware as you see fit
+// Init allows you to just initialize the handler cache, you can then recompose the middleware as you see fit
 func (o *CiliumAPI) Init() {
 	if len(o.handlers) == 0 {
 		o.initHandlerCache()
 	}
+}
+
+// RegisterConsumer allows you to add (or override) a consumer for a media type.
+func (o *CiliumAPI) RegisterConsumer(mediaType string, consumer runtime.Consumer) {
+	o.customConsumers[mediaType] = consumer
+}
+
+// RegisterProducer allows you to add (or override) a producer for a media type.
+func (o *CiliumAPI) RegisterProducer(mediaType string, producer runtime.Producer) {
+	o.customProducers[mediaType] = producer
 }
